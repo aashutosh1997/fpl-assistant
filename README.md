@@ -87,5 +87,6 @@ src/fplass/
   sim/              Monte Carlo engine
   optimise/         transfer MILP, chip roadmap, mini-league objective
   prices/           snapshots, calibration, buy-now-or-wait
+  report/           the HTML dashboard published as an Artifact
   advise.py         the pipeline behind `fpl plan`
 ```
