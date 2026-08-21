@@ -1,0 +1,22 @@
+{
+  "entry_id": 6086378,
+  "name": "Esteciao",
+  "manager": "Aashutosh Pyakurel",
+  "leagues": [
+    {"id": 653874, "name": "Fusemachines FPL"},
+    {"id": 1450644, "name": "DISGUSTING"}
+  ],
+  "gw1_squad": {
+    "note": "Entered manually: FPL does not publish picks before the GW1 deadline.",
+    "starting_xi": [109, 8, 4, 418, 397, 426, 427, 368, 346, 106, 165],
+    "bench_order": [496, 259, 334, 157],
+    "captain": 426,
+    "vice_captain": 165,
+    "names": {
+      "109": "Verbruggen", "8": "Calafiori", "4": "Gabriel", "418": "Maguire",
+      "397": "Semenyo", "426": "B.Fernandes", "427": "Mbeumo", "368": "Szoboszlai",
+      "346": "Calvert-Lewin", "106": "Thiago", "165": "Joao Pedro",
+      "496": "Kinsky", "259": "Diop", "334": "Muharemovic", "157": "Estevao"
+    }
+  }
+}

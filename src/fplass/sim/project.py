@@ -233,11 +233,18 @@ def player_form(con, season: str = CURRENT_SEASON, *, lookback: int = 10) -> pd.
                 max(prev_value)                                     AS prior_last_value
             FROM (
                 SELECT h.*,
-                       row_number() OVER (PARTITION BY element ORDER BY season DESC) AS season_rank
+                       -- dense_rank over *seasons*, not row_number over rows: row_number would
+                       -- rank every individual match, so `= 1` would keep a single game and
+                       -- `IS NOT NULL` (the original bug) keeps every season ever played. That
+                       -- averaged a player's whole career instead of last season, dragging
+                       -- established starters toward their earlier, more-rotated years — it put
+                       -- Joao Pedro at a 50% chance of playing an hour when he had started 31 of
+                       -- 38 and gone 60+ in 30 of them.
+                       dense_rank() OVER (PARTITION BY element ORDER BY season DESC) AS season_rank
                 FROM history h
                 WHERE h.season <> ? AND h.gw_seq <= h.season_last_gw - 2
             )
-            WHERE season_rank IS NOT NULL
+            WHERE season_rank = 1
             GROUP BY element
         )
         SELECT
