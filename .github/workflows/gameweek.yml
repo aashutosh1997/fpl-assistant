@@ -1,0 +1,70 @@
+name: gameweek-refresh
+
+# Refreshes the warehouse after each gameweek settles, and refits the bonus model on the new data.
+#
+# The timing matters. For 2026/27 the gameweek "lockdown" — when scores become final — moved to
+# 09:00 UK on the day after the last match, so that Opta review has time to settle bonus points and
+# defensive contributions. Ingesting before that captures provisional numbers that are then revised
+# underneath us. Running mid-morning on Monday and Tuesday covers both the normal Sunday finish and
+# the Monday-night fixtures.
+on:
+  schedule:
+    - cron: "37 10 * * 1,2"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --no-dev
+
+      - name: Refresh the live season
+        run: uv run fpl ingest current
+
+      - name: Refit the reworked bonus model on this season's matches
+        # The 2026/27 BPS weights were never published, so they are re-estimated as matches
+        # accumulate. Early in the season there is too little data and this is expected to report
+        # that it is falling back to the previous season's prior.
+        run: |
+          uv run python - <<'PY'
+          import logging
+          logging.basicConfig(level=logging.INFO, format="%(message)s")
+          from fplass.ingest.warehouse import connect
+          from fplass.features import bps
+
+          con = connect()
+          played = con.execute(
+              "SELECT count(DISTINCT gw) FROM player_gw WHERE season = '2026-27'"
+          ).fetchone()[0]
+          print(f"gameweeks played: {played}")
+          if played >= 3:
+              model = bps.fit(con, seasons=["2026-27"])
+              print("R2:", {k: round(v, 3) for k, v in model.r_squared.items()})
+          else:
+              print("not enough 2026-27 matches yet; still using the 2025-26 prior")
+          con.close()
+          PY
+
+      - name: Commit any refreshed snapshots
+        run: |
+          set -euo pipefail
+          git config user.name  "fpl-price-bot"
+          git config user.email "fpl-price-bot@users.noreply.github.com"
+          git add data/snapshots
+          if git diff --cached --quiet; then
+            echo "no change"
+            exit 0
+          fi
+          git commit -m "gameweek: refresh $(date -u +'%Y-%m-%d')"
+          git pull --rebase --autostash && git push

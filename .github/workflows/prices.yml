@@ -1,0 +1,65 @@
+name: price-snapshot
+
+# Snapshots FPL's price-change fields around the clock. The commits themselves are the time
+# series (git-scraper pattern), which also keeps the repo active — GitHub disables scheduled
+# workflows after 60 days of inactivity, and these commits reset that clock.
+#
+# Prices move at 00:00 UK, listed exactly in game_config.settings.price_change_deadlines.
+# We sample every 20 minutes across that window so calibration has a tight pre-move reading,
+# and hourly the rest of the day. GitHub's scheduler drifts by 5-15+ minutes under load, so the
+# dense window is deliberately wider than the event it is trying to bracket.
+on:
+  schedule:
+    # Dense window: 21:00-01:59 UK. Cron here is UTC; BST is UTC+1, so this covers both
+    # BST and GMT halves of the season without conditional logic.
+    - cron: "3,23,43 20-23,0 * * *"
+    # Hourly otherwise, deliberately off the :00 mark to dodge the fleet-wide cron spike.
+    - cron: "7 1-19 * * *"
+  workflow_dispatch:
+
+concurrency:
+  # Two overlapping runs would both try to push, and the loser wastes a full retry cycle.
+  group: price-snapshot
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --no-dev
+
+      - name: Take snapshot
+        run: uv run fpl prices snapshot
+
+      - name: Commit
+        run: |
+          set -euo pipefail
+          git config user.name  "fpl-price-bot"
+          git config user.email "fpl-price-bot@users.noreply.github.com"
+          git add data/snapshots/prices
+          if git diff --cached --quiet; then
+            echo "no change"
+            exit 0
+          fi
+          git commit -m "prices: snapshot $(date -u +'%Y-%m-%dT%H:%MZ')"
+          # Another snapshot may have landed while this one ran; rebase rather than fail,
+          # since losing a snapshot to a push race defeats the point of the job.
+          for attempt in 1 2 3 4 5; do
+            if git push; then exit 0; fi
+            echo "push failed (attempt $attempt); rebasing"
+            git pull --rebase --autostash
+            sleep $((attempt * 5))
+          done
+          echo "could not push after 5 attempts" >&2
+          exit 1

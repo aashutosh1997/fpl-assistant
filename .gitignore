@@ -1,0 +1,19 @@
+# Rebuildable from source data — never commit the warehouse.
+data/warehouse/
+data/cache/
+data/raw/
+data/reports/
+
+# Snapshots ARE the dataset: data/snapshots/ is deliberately committed.
+
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+.DS_Store

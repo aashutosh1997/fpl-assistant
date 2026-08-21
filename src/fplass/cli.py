@@ -1,0 +1,204 @@
+"""Command line interface.
+
+    fpl prices snapshot        one price/availability snapshot -> monthly CSV
+    fpl prices status          what the price fields currently say
+    fpl ingest history         load historical seasons into the warehouse
+    fpl ingest current         refresh this season from the live API
+"""
+
+from __future__ import annotations
+
+import logging
+
+import typer
+
+app = typer.Typer(
+    add_completion=False,
+    no_args_is_help=True,
+    help="Fantasy Premier League 2026/27 expert.",
+)
+prices_app = typer.Typer(no_args_is_help=True, help="Price tracking and price-rise optimisation.")
+ingest_app = typer.Typer(no_args_is_help=True, help="Load data into the warehouse.")
+app.add_typer(prices_app, name="prices")
+app.add_typer(ingest_app, name="ingest")
+
+
+@app.callback()
+def main(verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logging.")) -> None:
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    # httpx logs every request at INFO, which drowns our own output in cron logs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+@prices_app.command("snapshot")
+def prices_snapshot() -> None:
+    """Append one row per player to this month's price snapshot CSV."""
+    from .prices.snapshot import take_snapshot
+
+    path, n = take_snapshot()
+    typer.echo(f"appended {n} rows -> {path}")
+
+
+@prices_app.command("status")
+def prices_status(
+    limit: int = typer.Option(20, help="How many players to show."),
+    owned_only: bool = typer.Option(False, help="Restrict to your squad (needs a configured team)."),
+) -> None:
+    """Show what FPL's price-change fields currently predict."""
+    from .api import FPLClient
+    from .prices.snapshot import snapshot_metadata
+
+    with FPLClient() as client:
+        bootstrap = client.bootstrap(ttl=0)
+
+    meta = snapshot_metadata(bootstrap)
+    typer.echo(f"next price changes at: {', '.join(meta['price_change_deadlines']) or 'unknown'}")
+
+    def move_score(e: dict) -> float:
+        projections = e.get("price_change_projections") or []
+        if not projections:
+            return 0.0
+        first = projections[0]
+        try:
+            return float(first.get("projected_percent") or 0) * float(first.get("likelihood") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    elements = sorted(bootstrap["elements"], key=move_score)
+    interesting = elements[:limit] + elements[-limit:]
+    if all(move_score(e) == 0 for e in interesting):
+        typer.echo(
+            "All price-change projections are currently zero "
+            "(pre-season, or FPL's model is still calibrating)."
+        )
+        return
+
+    if owned_only:
+        typer.echo("--owned-only needs a configured team; not yet wired up.")
+
+    for e in interesting:
+        typer.echo(
+            f"{e['web_name']:<20} {e['now_cost'] / 10:>5.1f}  "
+            f"pct={e.get('price_change_percent'):>7}  "
+            f"score={move_score(e):+.3f}"
+        )
+
+
+@app.command("plan")
+def plan_command(
+    entry: int = typer.Option(None, help="Your FPL team (entry) id."),
+    league: int = typer.Option(None, help="Mini-league id to optimise for."),
+    gameweek: int = typer.Option(None, help="Gameweek to plan (default: the next one)."),
+    horizon: int = typer.Option(8, help="Gameweeks to plan ahead."),
+    draws: int = typer.Option(10_000, help="Monte Carlo draws."),
+    objective: str = typer.Option(
+        "league", help="league | points | blend — what to optimise for."
+    ),
+    solver_seconds: int = typer.Option(120, help="Per-solve time limit."),
+) -> None:
+    """Recommend this week's transfers, captain and chip strategy."""
+    from .advise import advise, format_report
+    from .ingest.warehouse import connect
+
+    con = connect()
+    try:
+        recommendation = advise(
+            con,
+            entry_id=entry,
+            league_id=league,
+            gameweek=gameweek,
+            horizon=horizon,
+            n_draws=draws,
+            objective=objective,
+            solver_time_limit=solver_seconds,
+        )
+        typer.echo(format_report(recommendation))
+    finally:
+        con.close()
+
+
+@app.command("squad")
+def squad_command(
+    budget: float = typer.Option(100.0, help="Budget in millions."),
+    horizon: int = typer.Option(8, help="Gameweeks to optimise over."),
+    draws: int = typer.Option(10_000, help="Monte Carlo draws."),
+    solver_seconds: int = typer.Option(180, help="Solver time limit."),
+) -> None:
+    """Build an optimal squad from scratch — for a wildcard, or the start of a season."""
+    from .ingest.warehouse import connect
+    from .optimise import milp
+    from .sim import project
+
+    con = connect()
+    try:
+        models = project.fit_models(con)
+        result, _, _ = project.project(con, models=models, horizon=horizon, n_draws=draws)
+        players = project.live_player_table(con)
+        state = milp.SquadState(players={}, bank=int(round(budget * 10)), free_transfers=15)
+        windows = milp.ChipWindows.from_warehouse(con, "2026-27")
+        plan = milp.solve(
+            result.expected_points,
+            players,
+            state,
+            windows,
+            allow_chips=False,
+            time_limit=solver_seconds,
+        )
+
+        gw = min(plan.squads)
+        info = players.set_index("element")
+        totals = result.expected_points.sum(axis=1)
+        last = max(plan.squads)
+        typer.echo(f"Optimal squad for GW{gw}-{last} (status {plan.status})")
+        # The XI marker is for GW1 only, while the total spans the horizon, so both are labelled.
+        # A player can rightly be benched in GW1 and start every week after.
+        typer.echo(f"{'':<12}{'':<20}{'':<6}{'':<6}  GW{gw}   GW{gw}-{last}   starts\n")
+        for position in ("GKP", "DEF", "MID", "FWD"):
+            for element in plan.squads[gw]:
+                row = info.loc[element]
+                if row["position"] != position:
+                    continue
+                marker = "XI   " if element in plan.lineups[gw] else "bench"
+                starts = sum(1 for g in plan.lineups if element in plan.lineups[g])
+                typer.echo(
+                    f"  {marker} {position} {row['web_name']:<18} {row['team']:<4} "
+                    f"{row['price'] / 10:>4.1f}  {result.expected_points.at[element, gw]:>5.2f}  "
+                    f"{totals.get(element, 0):>7.1f}  {starts:>5}/{len(plan.lineups)}"
+                )
+        cost = sum(int(info.loc[e, "price"]) for e in plan.squads[gw])
+        typer.echo(f"\n  cost {cost / 10:.1f}m of {budget:.1f}m")
+        typer.echo(f"  captain {info.loc[plan.captains[gw], 'web_name']}")
+    finally:
+        con.close()
+
+
+@ingest_app.command("history")
+def ingest_history(
+    seasons: str = typer.Option("all", help="Comma-separated seasons, or 'all'."),
+    rebuild: bool = typer.Option(False, help="Drop and recreate tables first."),
+) -> None:
+    """Load historical seasons from the vaastav dataset into DuckDB."""
+    from .ingest.history import load_seasons
+
+    which = None if seasons == "all" else [s.strip() for s in seasons.split(",")]
+    summary = load_seasons(seasons=which, rebuild=rebuild)
+    for table, count in sorted(summary.items()):
+        typer.echo(f"{table:<24} {count:>9,} rows")
+
+
+@ingest_app.command("current")
+def ingest_current() -> None:
+    """Refresh the current season's players, teams, fixtures and events from the live API."""
+    from .ingest.current import refresh_current
+
+    summary = refresh_current()
+    for table, count in sorted(summary.items()):
+        typer.echo(f"{table:<24} {count:>9,} rows")
+
+
+if __name__ == "__main__":
+    app()
