@@ -323,14 +323,37 @@ def apply_availability(
     return out
 
 
+def _logit(p: np.ndarray) -> np.ndarray:
+    clipped = np.clip(p, 1e-6, 1 - 1e-6)
+    return np.log(clipped / (1 - clipped))
+
+
+def _solve_tilt(probabilities: np.ndarray, target: float, iterations: int = 80) -> float:
+    """Find the shared log-odds shift that makes probabilities sum to ``target``.
+
+    Bisection on lambda in ``sum(sigmoid(logit(p) + lambda)) == target``. Monotone in lambda, so
+    bisection is reliable and needs no derivatives.
+    """
+    if len(probabilities) == 0:
+        return 0.0
+    logits = _logit(probabilities)
+    low, high = -14.0, 14.0
+    for _ in range(iterations):
+        mid = (low + high) / 2
+        total = 1.0 / (1.0 + np.exp(-(logits + mid)))
+        if total.sum() < target:
+            low = mid
+        else:
+            high = mid
+    return (low + high) / 2
+
+
 def calibrate_to_lineup(
     probabilities: pd.DataFrame,
     team_match: pd.Series,
     *,
     starters: float = 11.0,
     substitutes: float = 3.0,
-    max_probability: float = 0.985,
-    iterations: int = 40,
 ) -> pd.DataFrame:
     """Rescale minutes probabilities so each team fields a legal number of players.
 
@@ -345,10 +368,25 @@ def calibrate_to_lineup(
     the Haalands the optimiser most needs to price correctly — and flatters clubs with large,
     uncertain squads where the model spreads probability thinly.
 
-    Fixed by scaling each group's probabilities to the known totals. A plain ratio would push
-    nailed starters above 1.0, so the scaling is applied iteratively with a cap, redistributing the
-    excess among players who still have room. Relative ordering within a club is preserved
-    throughout; only the level changes.
+    The adjustment is a shared shift in **log-odds**, solved per club so the probabilities sum to
+    eleven starters and three substitutes.
+
+    Working in log-odds rather than scaling the probabilities directly is what makes this safe.
+    A multiplicative rescale has to be capped or it pushes nailed starters above 1.0 — and once
+    capped, the entire shortfall is dumped on the players who still have headroom, inflating
+    mid-probability ones absurdly. That is not hypothetical: it took Sessegnon, whose record is
+    twenty full appearances in thirty-eight and whose raw probability was 0.61, and reported him at
+    0.985 — a near-certain starter — which in turn made a 4.5m defender the third-highest scoring
+    player in the league and the model's preferred captain.
+
+    A log-odds shift has no such failure mode. It is monotone, so ordering is preserved exactly;
+    it saturates naturally at 0 and 1, so no cap is needed; and it moves each player in proportion
+    to how uncertain they already were, which is the correct distribution of the adjustment. A
+    near-certain starter barely moves while a genuine squad player moves a lot.
+
+    The shift can be large for a promoted club whose players have no Premier League record —
+    Coventry's raw starters summed to 4.3 — and that is the honest answer: eleven of them will
+    start, and we do not know which, so the probability spreads across the squad.
     """
     out = probabilities.copy()
     groups = pd.Series(team_match).to_numpy()
@@ -357,25 +395,11 @@ def calibrate_to_lineup(
         values = out[column].to_numpy(dtype="float64").copy()
         for _, indices in pd.Series(np.arange(len(values))).groupby(groups):
             index = indices.to_numpy()
-            for _ in range(iterations):
-                total = values[index].sum()
-                if total <= 1e-9:
-                    break
-                headroom = values[index] < max_probability
-                if not headroom.any():
-                    break
-                shortfall = target - values[index].sum()
-                if abs(shortfall) < 1e-6:
-                    break
-                adjustable = values[index][headroom].sum()
-                if adjustable <= 1e-9:
-                    break
-                scale = 1.0 + shortfall / adjustable
-                updated = values[index].copy()
-                updated[headroom] = np.clip(
-                    updated[headroom] * max(scale, 0.0), 0.0, max_probability
-                )
-                values[index] = updated
+            block = values[index]
+            if block.sum() <= 1e-9 or len(block) == 0:
+                continue
+            shift = _solve_tilt(block, min(target, len(block) * 0.98))
+            values[index] = 1.0 / (1.0 + np.exp(-(_logit(block) + shift)))
         out[column] = values
 
     # Keep the three classes a valid distribution. Where the two targets cannot both be met —
