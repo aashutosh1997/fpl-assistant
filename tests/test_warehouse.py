@@ -172,3 +172,21 @@ def test_match_player_stats_bps_agrees_with_player_gw(con):
         """
     ).fetchone()[0]
     assert disagreements == 0
+
+
+def test_next_gameweek_uses_deadlines_not_the_finished_flag(con):
+    """For 2026/27 the lockdown moved to 09:00 the day after the final match.
+
+    ``events.finished`` therefore stays False for days after every match has been played, and
+    keying off it made the planner recommend transfers for a gameweek that was already over.
+    """
+    from fplass.sim.project import next_gameweek
+
+    gw = next_gameweek(con)
+    played = con.execute(
+        "SELECT DISTINCT gw FROM player_gw WHERE season = '2026-27'"
+    ).fetchall()
+    for (finished_gw,) in played:
+        assert gw > finished_gw, (
+            f"planning GW{gw} but GW{finished_gw} already has results recorded"
+        )

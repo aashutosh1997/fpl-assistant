@@ -20,6 +20,7 @@ codes rather than the per-season ids FPL reassigns.
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 from dataclasses import dataclass
 
@@ -644,11 +645,31 @@ def store_projection(
 
 
 def next_gameweek(con, season: str = CURRENT_SEASON) -> int:
-    """The gameweek to plan for: the first whose deadline has not passed."""
+    """The gameweek to plan for: the first whose deadline has not yet passed.
+
+    Keyed on the deadline rather than on ``events.finished``. For 2026/27 FPL moved the gameweek
+    lockdown to 09:00 the day after the final match, so ``finished`` stays False for days after
+    every match has been played — which had this planning a gameweek that was already over, and
+    would have done so for most of every week.
+    """
+    now = pd.Timestamp(dt.datetime.now(dt.UTC)).tz_localize(None)
+    row = con.execute(
+        "SELECT min(event) FROM events WHERE season = ? AND deadline_time > ?",
+        [season, now],
+    ).fetchone()
+    if row and row[0] is not None:
+        return int(row[0])
+
+    # Every deadline has passed (end of season), or deadlines are not loaded: fall back to the
+    # first gameweek with no recorded results.
     row = con.execute(
         """
-        SELECT min(event) FROM events
-        WHERE season = ? AND (finished IS NULL OR finished = FALSE)
+        SELECT min(f.event) FROM fixtures f
+        WHERE f.season = ? AND f.event IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM player_gw g
+              WHERE g.season = f.season AND g.gw = f.event
+          )
         """,
         [season],
     ).fetchone()
