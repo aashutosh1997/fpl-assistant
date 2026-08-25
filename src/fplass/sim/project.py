@@ -26,6 +26,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from ..features import adjust as adjust_module
 from ..features import bps as bps_module
 from ..features import minutes as minutes_module
 from ..features import rates as rates_module
@@ -49,6 +50,11 @@ class ProjectionModels:
     bps: bps_module.BPSModel
     rules: ScoringRules
     season: str
+    # Recalibration of the minutes model on the season actually being played, using signals the
+    # base model cannot carry (preseason friendlies, ownership). None until enough gameweeks have
+    # been observed to fit it — at which point the base model passes through untouched, which is
+    # the honest behaviour when there is nothing to calibrate against.
+    minutes_adjustment: adjust_module.MinutesAdjustment | None = None
 
 
 def fit_models(
@@ -87,7 +93,41 @@ def fit_models(
         bps=bps_model,
         rules=rules_for_season(con, season),
         season=season,
+        minutes_adjustment=fit_minutes_adjustment(con, season),
     )
+
+
+def fit_minutes_adjustment(
+    con, season: str = CURRENT_SEASON
+) -> adjust_module.MinutesAdjustment | None:
+    """Fit the recalibration layer on whatever of this season has already been played.
+
+    Returns ``None`` before there is enough data, in which case the base model is used unchanged.
+    """
+    from ..backtest import calibrate_live
+
+    try:
+        frame = calibrate_live.scored_frame(con, season=season)
+    except Exception as exc:  # pragma: no cover - missing tables on a fresh warehouse
+        log.debug("no scored projections available: %s", exc)
+        return None
+    if frame.empty:
+        return None
+
+    frame = calibrate_live.attach_ownership(frame)
+    return adjust_module.fit(
+        frame,
+        frame["p_full"].to_numpy(dtype="float64"),
+        frame["played_full"].to_numpy(dtype="float64"),
+        gameweeks=tuple(sorted(int(g) for g in frame["gw"].unique())),
+    )
+
+
+def _price_snapshots() -> pd.DataFrame | None:
+    """The logged ownership history. Single implementation lives in the calibration harness."""
+    from ..backtest.calibrate_live import load_price_snapshots
+
+    return load_price_snapshots()
 
 
 def current_players(con, season: str = CURRENT_SEASON) -> pd.DataFrame:
@@ -364,6 +404,22 @@ def build_projection_inputs(
             chance_of_playing=merged.get("chance_of_playing_next_round"),
         )
 
+    # Recalibrate on this season's evidence — preseason minutes and ownership — before the lineup
+    # constraint, so the constraint is enforced on the corrected probabilities rather than being
+    # undone by them.
+    if models.minutes_adjustment is not None:
+        features = _adjustment_features(con, player_matches, season)
+        probabilities = probabilities.reset_index(drop=True)
+        adjusted = models.minutes_adjustment.apply(
+            features, probabilities["p_full"].to_numpy(dtype="float64")
+        )
+        # Keep the three classes coherent: the cameo mass rescales with the room left over.
+        remaining = 1.0 - adjusted
+        old_remaining = (1.0 - probabilities["p_full"]).clip(lower=1e-9)
+        probabilities["p_cameo"] = (probabilities["p_cameo"] / old_remaining) * remaining
+        probabilities["p_full"] = adjusted
+        probabilities["p_none"] = 1.0 - probabilities["p_full"] - probabilities["p_cameo"]
+
     # Enforce eleven starters and three substitutes per club per fixture. Applied after the
     # availability adjustment so that a club missing players through injury redistributes those
     # minutes to its remaining squad, which is what actually happens.
@@ -379,6 +435,37 @@ def build_projection_inputs(
     matrix = np.clip(matrix, 1e-6, 1.0)
     matrix /= matrix.sum(axis=1, keepdims=True)
     return player_matches, matrix
+
+
+def _adjustment_features(con, player_matches: pd.DataFrame, season: str) -> pd.DataFrame:
+    """Preseason and ownership features aligned to the player-match rows."""
+    from ..ingest import preseason as preseason_module
+
+    base = player_matches[["element"]].reset_index(drop=True)
+    try:
+        pre = preseason_module.player_features(con, season)
+        base = base.merge(pre, on="element", how="left")
+    except Exception as exc:  # pragma: no cover - preseason tables absent
+        log.debug("no preseason features available: %s", exc)
+
+    snapshots = _price_snapshots()
+    if snapshots is not None and not snapshots.empty:
+        latest = (
+            snapshots.sort_values("ts")
+            .groupby("element", as_index=False)
+            .tail(1)[["element", "selected_by_percent"]]
+        )
+        base = base.merge(latest, on="element", how="left")
+        ownership = pd.to_numeric(base["selected_by_percent"], errors="coerce").fillna(0.0)
+        base["log_ownership"] = np.log1p(ownership.clip(lower=0))
+    else:
+        base["log_ownership"] = 0.0
+
+    for column in ("preseason_minutes_avg", "preseason_observed", "preseason_matches"):
+        if column not in base.columns:
+            base[column] = 0.0
+        base[column] = pd.to_numeric(base[column], errors="coerce").fillna(0.0)
+    return base
 
 
 def _projection_features(con, player_matches: pd.DataFrame, season: str) -> pd.DataFrame:
@@ -444,8 +531,14 @@ def project(
     n_draws: int = 10_000,
     availability: pd.DataFrame | None = None,
     seed: int = 20262027,
+    store: bool = False,
 ) -> tuple[SimulationResult, pd.DataFrame, ProjectionModels]:
     """Project the next ``horizon`` gameweeks.
+
+    Args:
+        store: Persist the projection so it can be scored once the gameweek is played. The weekly
+            advisory path sets this; exploratory calls do not, to avoid filling the table with
+            variations that were never acted on.
 
     Returns:
         The simulation result, the player-match frame it was built from, and the fitted models
@@ -477,7 +570,77 @@ def project(
         n_draws=n_draws,
         seed=seed,
     )
+
+    if store:
+        try:
+            store_projection(
+                con,
+                result,
+                pd.DataFrame(probabilities, columns=list(minutes_module.CLASS_LABELS)),
+                player_matches,
+                season=models.season,
+            )
+        except Exception as exc:  # pragma: no cover - never lose a plan over bookkeeping
+            log.warning("could not store projection: %s", exc)
+
     return result, player_matches, models
+
+
+MODEL_VERSION = "2026-27.2"
+
+
+def store_projection(
+    con,
+    result: SimulationResult,
+    minutes_probabilities: pd.DataFrame,
+    player_matches: pd.DataFrame,
+    *,
+    season: str = CURRENT_SEASON,
+    made_at: dt.datetime | None = None,
+    model_version: str = MODEL_VERSION,
+) -> int:
+    """Persist a projection so it can be scored after the gameweek is played.
+
+    This is what makes the model self-correcting, and its absence was the reason gameweek 1 could
+    only be reviewed by reconstructing the prediction by hand. A projection is only evidence about
+    the model if it was recorded *before* the deadline, so ``made_at`` is stored and the
+    calibration layer reads the latest projection at or before each deadline.
+    """
+    from ..ingest.warehouse import upsert
+
+    made_at = made_at or dt.datetime.now(dt.UTC)
+    # Collapse to one row per (element, gameweek): a double gameweek produces two player-match rows
+    # but a single prediction per gameweek is what gets scored.
+    probs = minutes_probabilities.reset_index(drop=True)
+    frame = player_matches.reset_index(drop=True)[["element", "event"]].copy()
+    frame[["p_none", "p_cameo", "p_full"]] = probs[list(minutes_module.CLASS_LABELS)].to_numpy()
+    per_gw = frame.groupby(["element", "event"], as_index=False).agg(
+        p_none=("p_none", "mean"), p_cameo=("p_cameo", "mean"), p_full=("p_full", "max")
+    )
+
+    expected = result.expected_points
+    p10, p90 = result.quantile(0.10), result.quantile(0.90)
+    per_gw["expected_points"] = [
+        float(expected.at[e, g]) if e in expected.index and g in expected.columns else None
+        for e, g in zip(per_gw["element"], per_gw["event"], strict=True)
+    ]
+    per_gw["ep_p10"] = [
+        float(p10.at[e, g]) if e in p10.index and g in p10.columns else None
+        for e, g in zip(per_gw["element"], per_gw["event"], strict=True)
+    ]
+    per_gw["ep_p90"] = [
+        float(p90.at[e, g]) if e in p90.index and g in p90.columns else None
+        for e, g in zip(per_gw["element"], per_gw["event"], strict=True)
+    ]
+
+    per_gw = per_gw.rename(columns={"event": "gw"})
+    per_gw.insert(0, "season", season)
+    per_gw["made_at"] = pd.Timestamp(made_at).tz_localize(None)
+    per_gw["model_version"] = model_version
+
+    written = upsert(con, "projections", per_gw, ("season", "gw", "element", "made_at"))
+    log.info("stored %d projections for %s GW%s", written, season, sorted(per_gw["gw"].unique()))
+    return written
 
 
 def next_gameweek(con, season: str = CURRENT_SEASON) -> int:

@@ -191,6 +191,9 @@ def advise(
         horizon=horizon,
         n_draws=n_draws,
         availability=availability,
+        # Recorded before the deadline so `fpl calibrate` can score it afterwards. This is the
+        # only way the model learns whether its own advice was any good.
+        store=True,
     )
     expected_points = result.expected_points
 

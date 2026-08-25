@@ -186,6 +186,142 @@ def refresh_current(
         con.close()
 
 
+LIVE_STAT_COLUMNS = (
+    "minutes",
+    "goals_scored",
+    "assists",
+    "clean_sheets",
+    "goals_conceded",
+    "own_goals",
+    "penalties_saved",
+    "penalties_missed",
+    "yellow_cards",
+    "red_cards",
+    "saves",
+    "bonus",
+    "bps",
+    "influence",
+    "creativity",
+    "threat",
+    "ict_index",
+    "expected_goals",
+    "expected_assists",
+    "expected_goal_involvements",
+    "expected_goals_conceded",
+    "tackles",
+    "recoveries",
+    "clearances_blocks_interceptions",
+    "defensive_contribution",
+    "starts",
+    "total_points",
+)
+
+
+def ingest_live_gameweek(
+    con, gameweek: int, client: FPLClient | None = None, season: str = CURRENT_SEASON
+) -> int:
+    """Load a played gameweek's results from the live endpoint into ``player_gw``.
+
+    The community historical dataset lags by a day or more, and the calibration layer needs
+    outcomes as soon as they exist. The live endpoint carries the same per-player stats keyed by
+    element, and its ``explain`` block gives the fixture each set of stats belongs to — which is
+    what makes double gameweeks resolve into two rows rather than one merged one.
+
+    Safe to re-run: bonus and defensive contributions are revised for a day or two after the final
+    whistle, and the upsert replaces rather than duplicates.
+    """
+    owns_client = client is None
+    client = client or FPLClient()
+    try:
+        live = client.live(gameweek)
+        fixtures = client.fixtures(event=gameweek, ttl=0)
+        # Refresh the player reference first. FPL adds players mid-season (loan returns, late
+        # registrations), so the live feed routinely carries elements the warehouse has never
+        # seen — which would otherwise land as rows with no position or club.
+        bootstrap = client.bootstrap(ttl=0)
+    finally:
+        if owns_client:
+            client.close()
+
+    upsert(con, "teams", _teams_frame(bootstrap, season), ("season", "team_id"))
+    upsert(con, "players", _players_frame(bootstrap, season), ("season", "element"))
+
+    fixture_sides: dict[int, dict[int, bool]] = {}
+    fixture_opponent: dict[int, dict[int, int]] = {}
+    kickoffs: dict[int, str] = {}
+    for fixture in fixtures:
+        fid = fixture["id"]
+        kickoffs[fid] = fixture.get("kickoff_time")
+        fixture_sides[fid] = {fixture["team_h"]: True, fixture["team_a"]: False}
+        fixture_opponent[fid] = {
+            fixture["team_h"]: fixture["team_a"],
+            fixture["team_a"]: fixture["team_h"],
+        }
+
+    teams = dict(
+        con.execute(
+            "SELECT element, team_id FROM players WHERE season = ?", [season]
+        ).fetchall()
+    )
+    positions = dict(
+        con.execute(
+            """
+            SELECT element, CASE element_type WHEN 1 THEN 'GKP' WHEN 2 THEN 'DEF'
+                                              WHEN 3 THEN 'MID' ELSE 'FWD' END
+            FROM players WHERE season = ?
+            """,
+            [season],
+        ).fetchall()
+    )
+    names = dict(
+        con.execute("SELECT element, web_name FROM players WHERE season = ?", [season]).fetchall()
+    )
+
+    records: list[dict[str, Any]] = []
+    for element in live.get("elements", []):
+        eid = element["id"]
+        stats = element.get("stats", {})
+        explains = element.get("explain") or []
+        # One row per fixture the player featured in; fall back to a single row when the live feed
+        # gives no explain block (which happens for players who did not appear).
+        fixture_ids = [x.get("fixture") for x in explains if x.get("fixture")]
+        if not fixture_ids:
+            continue
+
+        team = teams.get(eid)
+        for fid in fixture_ids:
+            row: dict[str, Any] = {
+                "season": season,
+                "element": eid,
+                "fixture_id": fid,
+                "gw": gameweek,
+                "web_name": names.get(eid),
+                "position": positions.get(eid),
+                "was_home": fixture_sides.get(fid, {}).get(team),
+                "opponent_team": fixture_opponent.get(fid, {}).get(team),
+                "kickoff_time": kickoffs.get(fid),
+            }
+            for column in LIVE_STAT_COLUMNS:
+                row[column] = stats.get(column)
+            records.append(row)
+
+    if not records:
+        log.warning("no live data for GW%d", gameweek)
+        return 0
+
+    frame = pd.DataFrame.from_records(records)
+    frame["kickoff_time"] = pd.to_datetime(
+        frame["kickoff_time"], errors="coerce", utc=True
+    ).dt.tz_localize(None)
+    for column in LIVE_STAT_COLUMNS:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+
+    written = upsert(con, "player_gw", frame, ("season", "element", "fixture_id"))
+    create_as_of_view(con)
+    log.info("ingested %d player rows for %s GW%d", written, season, gameweek)
+    return written
+
+
 def chip_windows(con, season: str = CURRENT_SEASON) -> dict[str, list[tuple[int, int]]]:
     """Legal gameweek windows per chip name, e.g. ``{"bboost": [(1, 19), (20, 38)]}``.
 

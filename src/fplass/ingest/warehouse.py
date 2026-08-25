@@ -184,6 +184,56 @@ CREATE TABLE IF NOT EXISTS scoring_rules (
     points   DOUBLE,
     PRIMARY KEY (season, stat, position)
 );
+
+-- Preseason friendlies. The only observation of the *current* squad hierarchy that exists before
+-- a competitive ball is kicked, and the single strongest predictor of gameweek 1 minutes.
+-- Published for 2026-27 only, so every consumer must tolerate these tables being empty.
+CREATE TABLE IF NOT EXISTS preseason_player (
+    season                  VARCHAR NOT NULL,
+    element                 INTEGER NOT NULL,
+    preseason_matches       INTEGER,
+    preseason_minutes       DOUBLE,
+    preseason_minutes_avg   DOUBLE,
+    preseason_minutes_max   DOUBLE,
+    preseason_minutes_share DOUBLE,
+    preseason_goals         DOUBLE,
+    preseason_assists       DOUBLE,
+    preseason_xg            DOUBLE,
+    preseason_xa            DOUBLE,
+    PRIMARY KEY (season, element)
+);
+
+CREATE TABLE IF NOT EXISTS preseason_team (
+    season                  VARCHAR NOT NULL,
+    code                    INTEGER NOT NULL,   -- stable club code
+    preseason_played        INTEGER,
+    preseason_fixtures      INTEGER,
+    preseason_goals_for     DOUBLE,
+    preseason_goals_against DOUBLE,
+    preseason_xg_for        DOUBLE,
+    preseason_xg_against    DOUBLE,
+    PRIMARY KEY (season, code)
+);
+
+-- Every projection we make, stored *before* the deadline so it can be scored afterwards.
+--
+-- Without this there is nothing to calibrate against: projections were previously recomputed on
+-- demand and discarded, so after gameweek 1 the only way to ask "was the model right" was to
+-- reconstruct the prediction by hand. This table is what makes the model self-correcting.
+CREATE TABLE IF NOT EXISTS projections (
+    season        VARCHAR NOT NULL,
+    gw            INTEGER NOT NULL,
+    element       INTEGER NOT NULL,
+    made_at       TIMESTAMP NOT NULL,   -- must be before the deadline to be a valid prediction
+    model_version VARCHAR,
+    p_none        DOUBLE,
+    p_cameo       DOUBLE,
+    p_full        DOUBLE,
+    expected_points DOUBLE,
+    ep_p10        DOUBLE,
+    ep_p90        DOUBLE,
+    PRIMARY KEY (season, gw, element, made_at)
+);
 """
 
 
@@ -220,6 +270,9 @@ def drop_all(con: duckdb.DuckDBPyConnection) -> None:
         "events",
         "chips",
         "scoring_rules",
+        "preseason_player",
+        "preseason_team",
+        "projections",
     ):
         con.execute(f"DROP TABLE IF EXISTS {table}")
     con.execute(SCHEMA)

@@ -23,10 +23,15 @@ uv venv --python 3.12 && uv pip install -e ".[dev]"
 
 python -m fplass.cli ingest history     # eleven seasons, ~1 min
 python -m fplass.cli ingest current     # live prices, fixtures, chips, scoring rules
+python -m fplass.cli ingest preseason   # friendlies: the best predictor of GW1 minutes
 
 python -m fplass.cli plan --entry <YOUR_TEAM_ID> --league <LEAGUE_ID>
 python -m fplass.cli squad --budget 100          # best squad from scratch
 python -m fplass.cli prices status
+
+# after each gameweek
+python -m fplass.cli ingest gameweek 1
+python -m fplass.cli calibrate                   # score past projections, refit the model
 ```
 
 Your team id is the number in your `fantasy.premierleague.com/entry/<ID>/` URL. Everything uses
@@ -54,11 +59,37 @@ Other components are validated where they can be:
 
 | Component | Validation |
 |---|---|
-| Scoring engine | Exact on 253,509 rows, 10 seasons |
+| Scoring engine | Exact on 253,509 historical rows **and on GW1 2026/27 live** |
 | Bonus allocation | Exact on 29,747 rows including ties |
-| Minutes model | Brier skill 0.485 over base rate; calibrated within ±0.03 in every bin |
-| Team strength | Hyperparameters cross-validated; 365-day half-life recovered independently |
+| Team strength | Cross-validated; GW1 predicted 28.4 goals vs 30 actual, 5.2 clean sheets vs 6 |
+| Player ranking | GW1 top-30 by projection scored 2.05x the league average |
 | DEFCON reconstruction | Identity verified exactly against 2025-26 actuals |
+| Minutes model | **This is the weak component — see below** |
+
+### What gameweek 1 taught us
+
+The first real test was humbling: the model's own squad would have scored **34 against a 48
+average**. The failure was concentrated entirely in minutes at the start of a season — Brier skill
+was **0.251 in GW1 against 0.485 in backtest**, because the base model is trained on within-season
+sequences and August has no current-season form to read.
+
+Two signals fixed most of it, neither of which the base model can carry:
+
+| Predicting GW1 60+ minutes | Brier (5-fold CV) |
+|---|---|
+| Base model | 0.1704 |
+| + preseason friendly minutes | 0.1281 |
+| + ownership | 0.1491 |
+| **+ both** | **0.1161** |
+
+Preseason had every one of the big misses right: Joao Pedro played 80 minutes a game across four
+friendlies (model: 0.69, actual: 90 minutes and 11 points); Kinsky 67.5 (model: 0.08, actual: 90);
+Dubravka 22.5 (model: 0.93, actual: 0).
+
+These feed a **recalibration layer** (`features/adjust.py`) fitted on the season being played rather
+than on history, so it improves every week and does nothing at all when there is nothing to
+calibrate against. Re-running GW1 with it, the model's squad scores **42 instead of 34** — though
+that number is in-sample, and GW2 is the honest test.
 
 ## Known limitations
 

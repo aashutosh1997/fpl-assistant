@@ -200,5 +200,69 @@ def ingest_current() -> None:
         typer.echo(f"{table:<24} {count:>9,} rows")
 
 
+@ingest_app.command("preseason")
+def ingest_preseason(
+    season: str = typer.Option("2026-27", help="Season to load friendlies for."),
+    refresh: bool = typer.Option(False, help="Re-download rather than using the cache."),
+) -> None:
+    """Load preseason friendlies — the strongest available predictor of gameweek 1 minutes."""
+    from .ingest import preseason
+    from .ingest.warehouse import connect
+
+    con = connect()
+    try:
+        summary = preseason.load(con, season, refresh=refresh)
+        if not summary:
+            typer.echo(f"no preseason friendlies published for {season}")
+            return
+        for table, count in sorted(summary.items()):
+            typer.echo(f"{table:<24} {count:>9,} rows")
+    finally:
+        con.close()
+
+
+@ingest_app.command("gameweek")
+def ingest_gameweek(
+    gameweek: int = typer.Argument(..., help="Gameweek to load results for."),
+    season: str = typer.Option("2026-27", help="Season."),
+) -> None:
+    """Load a played gameweek's results from the live API. Safe to re-run as bonus settles."""
+    from .ingest.current import ingest_live_gameweek
+    from .ingest.warehouse import connect
+
+    con = connect()
+    try:
+        typer.echo(f"{ingest_live_gameweek(con, gameweek, season=season):,} player rows")
+    finally:
+        con.close()
+
+
+@app.command("calibrate")
+def calibrate_command(
+    season: str = typer.Option("2026-27", help="Season to score."),
+    upto: int = typer.Option(99, help="Score gameweeks before this one."),
+) -> None:
+    """Score stored projections against what actually happened.
+
+    This is what makes the model self-correcting: it reports where the projections were wrong and
+    refits the recalibration layer on the season being played.
+    """
+    from .backtest import calibrate_live
+    from .ingest.warehouse import connect
+
+    con = connect()
+    try:
+        report = calibrate_live.run(con, season=season, upto_gw=upto)
+        if report is None:
+            typer.echo(
+                "No stored projections to score. Projections are recorded when you run "
+                "`fpl plan`, so this fills in from the first gameweek you plan for."
+            )
+            return
+        typer.echo(report.summary())
+    finally:
+        con.close()
+
+
 if __name__ == "__main__":
     app()
