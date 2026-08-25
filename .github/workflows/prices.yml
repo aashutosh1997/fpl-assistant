@@ -8,13 +8,21 @@ name: price-snapshot
 # We sample every 20 minutes across that window so calibration has a tight pre-move reading,
 # and hourly the rest of the day. GitHub's scheduler drifts by 5-15+ minutes under load, so the
 # dense window is deliberately wider than the event it is trying to bracket.
+# Cadence was cut roughly 60% (from ~34 snapshots a day to ~13) once four days of logging
+# established what the fields do. Prices move once daily at 23:00 UTC, and price_change_percent is
+# a signed progress bar against a threshold of 100 with price_change_hourly_rate giving its
+# derivative — so a reading close to the deadline plus the rate is enough to project the move.
+# Dense sampling through the afternoon was measuring a curve we can already extrapolate.
 on:
   schedule:
-    # Dense window: 21:00-01:59 UK. Cron here is UTC; BST is UTC+1, so this covers both
-    # BST and GMT halves of the season without conditional logic.
-    - cron: "3,23,43 20-23,0 * * *"
-    # Hourly otherwise, deliberately off the :00 mark to dodge the fleet-wide cron spike.
-    - cron: "7 1-19 * * *"
+    # Around the change itself: every 30 minutes from 21:00 to 23:59 UTC, so the final
+    # pre-change state is always captured within half an hour.
+    - cron: "11,41 21-23 * * *"
+    # Immediately after, to record what actually changed.
+    - cron: "13 0 * * *"
+    # Every three hours the rest of the day: enough to track the trajectory building through the
+    # day without re-measuring a slope we can compute.
+    - cron: "17 3,6,9,12,15,18 * * *"
   workflow_dispatch:
 
 concurrency:
