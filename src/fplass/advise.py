@@ -40,6 +40,9 @@ DEFAULT_HORIZON = 8
 DEFAULT_DRAWS = 10_000
 PLAN_POOL_SIZE = 6
 
+# Everything before this gameweek's deadline is an unlimited squad build, not a transfer week.
+FIRST_GAMEWEEK = 1
+
 
 @dataclass(slots=True)
 class Recommendation:
@@ -85,8 +88,10 @@ def load_squad_state(
     last_gameweek = max((row["event"] for row in played), default=0)
 
     if last_gameweek == 0:
+        # Pre-season: the squad is built from scratch with unlimited changes, so the transfer
+        # budget is the squad size rather than a free-transfer count.
         log.info("entry %d has no completed gameweeks yet", entry_id)
-        return milp.SquadState(players={}, bank=1000, free_transfers=15)
+        return milp.SquadState(players={}, bank=1000, free_transfers=milp.SQUAD_SIZE)
 
     picks = client.entry_picks(entry_id, last_gameweek)
     squad = [p["element"] for p in picks.get("picks", [])]
@@ -131,12 +136,21 @@ def _free_transfers(history: dict, last_gameweek: int) -> int:
     FPL does not expose this directly. You gain one per gameweek and may bank up to five, so it can
     be replayed from how many transfers you made each week. Wildcard and Free Hit weeks are skipped
     because their transfers are free and do not consume the balance.
+
+    **Gameweek 1 is not a gameweek for this purpose.** Everything before the season's first
+    deadline is an unlimited squad build — effectively a free wildcard — so it neither spends a
+    transfer nor banks one. You enter gameweek 2 with exactly one free transfer no matter what you
+    did beforehand. Counting gameweek 1 as an ordinary week credits a transfer that does not exist,
+    and a plan built on a phantom transfer is one that takes an unplanned -4 to execute.
     """
-    banked = 1
+    banked = 1  # what you hold entering gameweek 2
     chip_weeks = {row["event"]: row["name"] for row in history.get("chips", [])}
+
     for row in sorted(history.get("current", []), key=lambda r: r.get("event", 0)):
         gameweek = row.get("event")
         if not gameweek or gameweek > last_gameweek:
+            continue
+        if gameweek == FIRST_GAMEWEEK:
             continue
         if chip_weeks.get(gameweek) in {"wildcard", "freehit"}:
             banked = min(banked + 1, milp.MAX_BANKED_TRANSFERS)
