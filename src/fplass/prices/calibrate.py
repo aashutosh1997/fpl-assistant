@@ -240,6 +240,73 @@ def _auc(y: np.ndarray, scores: np.ndarray) -> float:
     return float((ranks[positives].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
 
 
+def official_projection(
+    snapshot: pd.DataFrame, *, hours_to_deadline: float | None = None
+) -> pd.DataFrame:
+    """Read FPL's own price fields directly, now that their semantics are known.
+
+    Four days of hourly snapshots decoded them, and they are simpler than a fitted model:
+
+    ``price_change_percent``
+        **Signed** progress toward the next move, observed spanning -86 to +102. Positive counts
+        toward a rise, negative toward a fall, and 100 is the threshold. The player observed at
+        101.7 was the only one due to change at the next deadline.
+
+    ``price_change_projections[].likelihood``
+        **Not a probability.** An ordinal severity bucket running -3 to +5 whose sign always agrees
+        with the percent — a discretisation of the same quantity, not independent evidence. Treating
+        it as a 0-1 probability, as this module originally did, silently multiplied every estimate
+        by a number up to five.
+
+    ``price_change_hourly_rate``
+        How fast the percent is moving, which is what lets an in-progress reading be extrapolated
+        to the deadline rather than read as if it were final.
+
+    Because the threshold is explicit there is nothing to fit: the probability of a move is a
+    function of how far the projected percent lands past 100. The logistic model in :func:`fit`
+    remains useful for learning how *reliable* these fields turn out to be, but it is no longer
+    required to interpret them.
+
+    Args:
+        hours_to_deadline: Hours until the next daily price change. When supplied, the current
+            percent is extrapolated forward at the hourly rate.
+    """
+    frame = snapshot.copy()
+
+    def column(name: str, default: float = 0.0) -> np.ndarray:
+        if name not in frame.columns:
+            return np.full(len(frame), default)
+        return pd.to_numeric(frame[name], errors="coerce").fillna(default).to_numpy(dtype="float64")
+
+    percent = column("price_change_percent")
+    rate = column("price_change_hourly_rate")
+
+    projected = percent.copy()
+    if hours_to_deadline is not None and hours_to_deadline > 0:
+        projected = percent + rate * hours_to_deadline
+    else:
+        # Fall back to FPL's own next-day projection where it is present.
+        published = column("proj0_percent")
+        projected = np.where(published != 0, published, percent)
+
+    # A soft threshold rather than a step: the percent is an estimate and players sitting just
+    # short of 100 do sometimes tip over before the deadline.
+    margin = 12.0
+    p_rise = np.clip((projected - 100.0) / margin + 0.5, 0.0, 1.0)
+    p_fall = np.clip((-projected - 100.0) / margin + 0.5, 0.0, 1.0)
+
+    return pd.DataFrame(
+        {
+            "element": frame["element"].to_numpy(),
+            "p_rise": p_rise,
+            "p_fall": p_fall,
+            "percent": percent,
+            "projected_percent": projected,
+            "source": "official",
+        }
+    )
+
+
 def classical_model(snapshot: pd.DataFrame) -> pd.DataFrame:
     """The pre-2026/27 heuristic: net transfers against an ownership-scaled threshold.
 

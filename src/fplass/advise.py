@@ -371,7 +371,14 @@ def _price_stage(
                 "probabilities are provisional."
             )
     else:
-        probabilities = calibrate_module.classical_model(snapshot)
+        # FPL's own fields are now decoded and are more direct than anything we can fit this
+        # early; the classical net-transfer heuristic is only needed if they are absent.
+        if "price_change_percent" in snapshot.columns:
+            probabilities = calibrate_module.official_projection(
+                snapshot, hours_to_deadline=None
+            )
+        else:
+            probabilities = calibrate_module.classical_model(snapshot)
 
     days = 3.0
     if deadline is not None:
