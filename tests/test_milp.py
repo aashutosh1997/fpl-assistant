@@ -419,3 +419,18 @@ def test_lineups_summary_shows_every_starter_and_the_bench(points, universe, win
         assert names[e] in text
     assert text.count("(C)") == len(GAMEWEEKS)
     assert text.count("bench:") == len(GAMEWEEKS)
+
+
+def test_locked_players_are_in_the_squad_without_being_captain(points, universe, windows):
+    """A lock forces membership and nothing else: the captain is still chosen on merit."""
+    state = SquadState(players={}, bank=1000, free_transfers=15)
+    opening = solve_scenario(points, universe, state, windows, allow_chips=False)
+    squad = opening.squads[GAMEWEEKS[0]]
+    # The cheapest outsider would never be picked on points alone.
+    outsider = int(universe[~universe["element"].isin(squad)].nsmallest(1, "price")["element"].iloc[0])
+    plan = solve_scenario(
+        points, universe, state, windows, allow_chips=False, lock={GAMEWEEKS[0]: [outsider]}
+    )
+    assert outsider in plan.squads[GAMEWEEKS[0]]
+    assert plan.captains[GAMEWEEKS[0]] != outsider
+    assert plan.objective < opening.objective

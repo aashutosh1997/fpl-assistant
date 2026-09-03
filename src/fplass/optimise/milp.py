@@ -219,6 +219,7 @@ def shortlist(
     current: SquadState,
     *,
     per_position: int = 40,
+    must_keep: set[int] | None = None,
 ) -> pd.DataFrame:
     """Cut the player pool down to a tractable, near-lossless shortlist.
 
@@ -232,7 +233,7 @@ def shortlist(
     pool = players.join(totals, on="element")
     pool["ep_total"] = pool["ep_total"].fillna(0.0)
 
-    keep: set[int] = set(current.elements)
+    keep: set[int] = set(current.elements) | set(must_keep or ())
     for position, group in pool.groupby("position"):
         keep |= set(group.nlargest(per_position, "ep_total")["element"])
         # Cheap enablers: the best player at each price point, so the solver can always find a
@@ -262,6 +263,7 @@ def solve(
     allow_chips: bool = True,
     chip_schedule: dict[int, str] | None = None,
     forbidden: list[dict] | None = None,
+    lock: dict[int, list[int]] | None = None,
     time_limit: int = 120,
     msg: bool = False,
 ) -> Plan:
@@ -290,6 +292,10 @@ def solve(
             (see :mod:`fplass.optimise.chips`) is enforced: left to itself over an eight-week
             horizon the solver will always burn every chip it can, because a chip saved past the
             horizon appears worthless to it.
+        lock: Players that must be in the squad in given gameweeks, as ``{gameweek: [elements]}``.
+            The honest way to ask "what does the best plan with X look like": everything else
+            is re-optimised around the constraint, rather than X being bribed into the plan with
+            inflated points, which also makes him captain and distorts the rest of the squad.
         forbidden: Previously found solutions to exclude, so the solver can be called repeatedly
             to build a pool of distinct near-optimal plans for the league-aware stage.
         time_limit: Solver time limit in seconds.
@@ -298,7 +304,10 @@ def solve(
         The solved :class:`Plan`.
     """
     gameweeks = gameweeks or [int(c) for c in expected_points.columns]
-    pool = shortlist(expected_points, players, current)
+    lock = {int(gw): [int(e) for e in elements] for gw, elements in (lock or {}).items()}
+    pool = shortlist(
+        expected_points, players, current, must_keep={e for es in lock.values() for e in es}
+    )
 
     elements = pool["element"].tolist()
     position = dict(zip(pool["element"], pool["position"], strict=True))
@@ -365,6 +374,9 @@ def solve(
         free_hit = chip_active("freehit", gw)
 
         problem += pulp.lpSum(squad[e, gw] for e in elements) == SQUAD_SIZE
+        for locked in lock.get(gw, []):
+            if locked in elements:
+                problem += squad[locked, gw] == 1
 
         # The free-hit squad exists *only* in a gameweek where the chip is played. Gating it on
         # the chip is essential, not tidiness: left free, it acts as a second team that scores
