@@ -43,12 +43,14 @@ import pandas as pd
 
 from .milp import (
     CLUB_LIMIT,
+    HIT_COST,
     LINEUP_MAX,
     LINEUP_MIN,
     LINEUP_SIZE,
     ChipWindows,
     Plan,
     SquadState,
+    solve,
 )
 
 log = logging.getLogger(__name__)
@@ -251,6 +253,64 @@ def value_free_hit(
     return results
 
 
+def plan_value(plan: Plan) -> float:
+    """Expected points of a plan over its horizon, net of hits."""
+    return float(sum(plan.expected_points.values()) - HIT_COST * sum(plan.hits.values()))
+
+
+def value_wildcard(
+    expected_points: pd.DataFrame,
+    players: pd.DataFrame,
+    state: SquadState,
+    chip_windows: ChipWindows,
+    baseline: Plan,
+    *,
+    candidates: int = 3,
+    time_limit: int = 60,
+) -> list[tuple[int, float, float]]:
+    """Value a wildcard in each of the next few gameweeks against the chip-free plan.
+
+    A wildcard is not a one-week payoff, so it cannot be read off the samples like the other
+    chips: its worth is the gap between the best plan that rebuilds the squad in that gameweek
+    and the best plan that does not, over the whole horizon. That means one solve per candidate
+    gameweek, which is why only the next few are tried — the gain from rebuilding later is
+    always available to re-measure next week, and the first-half wildcard's option value
+    beyond the horizon is what the floor in :func:`build_roadmap` stands for.
+
+    Until this existed the roadmap never scheduled a wildcard at all, and the advisor could not
+    say whether a rebuild beat a string of hits. On gameweek 3 of 2026/27 it did, by fifteen
+    points over eight gameweeks.
+
+    Returns:
+        ``(gameweek, mean_gain, upside)`` per candidate; upside is the gain itself, since the
+        rebuilt squad's distribution is not sampled here.
+    """
+    reference = plan_value(baseline)
+    horizon = [int(g) for g in expected_points.columns]
+    rows: list[tuple[int, float, float]] = []
+    tried = 0
+    for gw in horizon:
+        if tried >= candidates:
+            break
+        windows = chip_windows.legal("wildcard", gw)
+        if not windows or all(f"wildcard:{w}" in state.chips_used for w in windows):
+            continue
+        tried += 1
+        plan = solve(
+            expected_points,
+            players,
+            state,
+            chip_windows,
+            chip_schedule={gw: "wildcard"},
+            time_limit=time_limit,
+        )
+        if plan.status not in {"Optimal", "Not Solved"}:
+            continue
+        gain = plan_value(plan) - reference
+        rows.append((gw, gain, gain))
+    return rows
+
+
 def build_roadmap(
     con,
     samples: np.ndarray,
@@ -263,6 +323,8 @@ def build_roadmap(
     season: str,
     *,
     min_gain: dict[str, float] | None = None,
+    wildcard_candidates: int = 3,
+    solver_time_limit: int = 60,
 ) -> ChipRoadmap:
     """Value every chip in every legal gameweek and pick a schedule.
 
@@ -272,6 +334,9 @@ def build_roadmap(
         min_gain: Minimum points gain before a chip is worth playing at all. This is the chip's
             option value: playing a Bench Boost for two points now forfeits the chance of a much
             better one later, so a floor prevents the solver frittering chips away.
+        wildcard_candidates: How many of the next legal gameweeks to try a wildcard in; each
+            costs a solve. Zero skips the wildcard entirely.
+        solver_time_limit: Seconds per wildcard solve.
 
     Returns:
         A :class:`ChipRoadmap`.
@@ -307,6 +372,20 @@ def build_roadmap(
         for window in chip_windows.legal("freehit", gw):
             rows.append(ChipValuation("freehit", gw, window, mean_gain, upside))
 
+    if wildcard_candidates > 0:
+        expected = pd.DataFrame(samples.mean(axis=0), index=elements, columns=horizon)
+        for gw, mean_gain, upside in value_wildcard(
+            expected,
+            players,
+            state,
+            chip_windows,
+            baseline,
+            candidates=wildcard_candidates,
+            time_limit=solver_time_limit,
+        ):
+            for window in chip_windows.legal("wildcard", gw):
+                rows.append(ChipValuation("wildcard", gw, window, mean_gain, upside))
+
     # dataclasses.asdict, not vars(): these are slots dataclasses and have no __dict__.
     valuations = pd.DataFrame([asdict(r) for r in rows])
 
@@ -341,7 +420,7 @@ def build_roadmap(
             "as cup postponements land, and Bench Boost and Free Hit are worth far more once they "
             "do — so second-half chips are best held rather than spent on fixture quality."
         )
-    skipped = [c for c in ("bboost", "3xc", "freehit") if c not in schedule.values()]
+    skipped = [c for c in ("bboost", "3xc", "freehit", "wildcard") if c not in schedule.values()]
     if skipped:
         notes.append(
             "Holding "

@@ -355,3 +355,39 @@ def test_hits_are_exactly_the_transfers_beyond_the_free_ones(points, universe, w
     first = GAMEWEEKS[0]
     assert set(stars) <= set(plan.transfers_in[first])
     assert plan.hits[first] == len(plan.transfers_in[first]) - 1
+
+
+def test_wildcard_is_valued_against_the_chip_free_plan(points, universe, windows):
+    """A squad far from the best available team must show a positive wildcard gain.
+
+    The roadmap previously valued Bench Boost, Triple Captain and Free Hit but never the
+    wildcard, so the advisor could not weigh a rebuild against a string of hits.
+    """
+    from fplass.optimise import chips
+
+    state = SquadState(players={}, bank=1000, free_transfers=15)
+    opening = solve_scenario(points, universe, state, windows, allow_chips=False)
+    squad = opening.squads[GAMEWEEKS[0]]
+    price = universe.set_index("element")["price"]
+    held = SquadState(
+        players={e: int(price.loc[e]) for e in squad},
+        bank=1000 - int(price.loc[squad].sum()),
+        free_transfers=1,
+    )
+    # Five unowned players become far better than anything held: more than hits can buy.
+    boosted = points.copy()
+    stars = universe[~universe["element"].isin(squad)].nsmallest(5, "price")["element"]
+    for star in stars:
+        boosted.loc[star] += 10.0
+    baseline = solve_scenario(boosted, universe, held, windows, allow_chips=False)
+
+    valued = chips.value_wildcard(
+        boosted, universe, held, windows, baseline, candidates=1, time_limit=30
+    )
+    assert valued, "the wildcard window opens in gameweek 2, so one candidate must be valued"
+    gw, gain, _ = valued[0]
+    assert gw == 2, "gameweek 1 is outside the wildcard window"
+    assert gain > 0
+
+    used = SquadState(players=held.players, bank=held.bank, free_transfers=1, chips_used={"wildcard:0"})
+    assert chips.value_wildcard(boosted, universe, used, windows, baseline, candidates=1) == []
