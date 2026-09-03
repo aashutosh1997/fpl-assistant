@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 
 from ..features import adjust as adjust_module
+from ..features import arrivals as arrivals_module
 from ..features import bps as bps_module
 from ..features import minutes as minutes_module
 from ..features import rates as rates_module
@@ -464,6 +465,14 @@ def build_projection_inputs(
         probabilities["p_cameo"] = (probabilities["p_cameo"] / old_remaining) * remaining
         probabilities["p_full"] = adjusted
         probabilities["p_none"] = 1.0 - probabilities["p_full"] - probabilities["p_cameo"]
+
+    # New signings since the last recorded gameweek make their club-mates' minutes uncertain in
+    # a way no feature can see yet. Widen the affected players toward their club-position mean
+    # so the optimiser prices the risk; the lineup constraint below then re-fields the club.
+    arrivals = arrivals_module.detect_arrivals(con, season)
+    risk = arrivals_module.disruption(player_matches, arrivals)
+    player_matches["minutes_risk"] = risk.to_numpy(dtype="float64")
+    probabilities = arrivals_module.widen(probabilities, player_matches, risk)
 
     # Enforce eleven starters and three substitutes per club per fixture. Applied after the
     # availability adjustment so that a club missing players through injury redistributes those

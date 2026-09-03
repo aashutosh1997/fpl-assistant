@@ -198,7 +198,7 @@ def advise(
     # ---- 2. simulate the horizon
     models = models or project.fit_models(con, season=season)
     availability = players[["element", "status", "chance_of_playing_next_round"]]
-    result, _, models = project.project(
+    result, player_matches, models = project.project(
         con,
         models=models,
         start_gameweek=target_gameweek,
@@ -295,6 +295,8 @@ def advise(
         solver_time_limit,
     )
 
+    notes.extend(_minutes_risk_notes(chosen, player_matches, players, target_gameweek))
+
     return Recommendation(
         gameweek=target_gameweek,
         plan=chosen,
@@ -310,6 +312,42 @@ def advise(
         deadline=deadline,
         notes=notes,
     )
+
+
+def _minutes_risk_notes(
+    plan: milp.Plan, player_matches: pd.DataFrame, players: pd.DataFrame, gameweek: int
+) -> list[str]:
+    """Name the recommended players whose minutes a new signing has just made uncertain.
+
+    The projection has already been widened for them (see :mod:`fplass.features.arrivals`), so
+    the plan accounts for the risk; this makes the accounting visible, because a reader who sees
+    a captain pick with a settled role beat a higher-ceiling one should know why.
+    """
+    if "minutes_risk" not in player_matches.columns:
+        return []
+    risk = (
+        player_matches[player_matches["event"] == gameweek]
+        .groupby("element")["minutes_risk"]
+        .max()
+    )
+    names = players.set_index("element")["web_name"]
+    squad = plan.squads.get(gameweek, [])
+    lineup = set(plan.lineups.get(gameweek, []))
+    flagged = [(e, float(risk.get(e, 0.0))) for e in squad if risk.get(e, 0.0) > 0]
+    if not flagged:
+        return []
+    flagged.sort(key=lambda item: -item[1])
+    described = ", ".join(
+        f"{names.get(e, e)} ({'starting' if e in lineup else 'bench'}, widened {w:.0%})"
+        for e, w in flagged
+    )
+    return [
+        "Minutes risk from new signings, already priced into this plan: "
+        f"{described}. Their club bought a competitor for the shirt after the last recorded "
+        "gameweek, so their projections were pulled toward the club average until a lineup "
+        "shows who starts. A settled alternative with the same mean is the safer pick, and "
+        "the bench matters more this week."
+    ]
 
 
 def _league_note(league: league_module.LeagueState, metrics: dict[str, float]) -> str:
