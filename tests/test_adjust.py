@@ -89,6 +89,34 @@ def test_shift_is_bounded():
     assert adjusted.max() <= ceiling + 1e-6
 
 
+def test_correction_fades_with_current_season_evidence():
+    """The layer stands in for evidence the base model lacks in August, and must step aside once
+    the base model has real minutes.
+
+    Applied at full strength to gameweek 2, the gameweek-1 layer made the base model *worse*
+    (Brier 0.092 -> 0.119); scaled by 1/(1+n)^2 it was a footnote (0.096).
+    """
+    weights = adjust.evidence_weight(np.array([0, 1, 2, 3, 10]))
+    assert weights[0] == 1.0
+    assert weights[1] == pytest.approx(0.25)
+    assert weights[3] < 0.07
+    assert np.all(np.diff(weights) < 0)
+
+    n = 2000
+    base = np.full(n, 0.5)
+    frame = _frame(n, preseason_minutes_avg=np.full(n, 90.0), preseason_observed=np.ones(n))
+    layer = adjust.fit(frame, base, np.ones(n))
+    assert layer is not None
+
+    fresh = layer.apply(frame.assign(n_current=0.0), base)
+    one_match = layer.apply(frame.assign(n_current=1.0), base)
+    settled = layer.apply(frame.assign(n_current=5.0), base)
+    assert fresh.mean() > one_match.mean() > settled.mean()
+    assert abs(settled.mean() - 0.5) < 0.05, "after five matches the base model should stand"
+    # Without the column the layer applies in full, so existing callers are unchanged.
+    assert layer.apply(frame, base).mean() == pytest.approx(fresh.mean())
+
+
 def test_probabilities_stay_in_range():
     rng = np.random.default_rng(4)
     n = 3000

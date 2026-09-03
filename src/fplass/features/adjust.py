@@ -98,15 +98,35 @@ class MinutesAdjustment:
         """Adjust base probabilities using the layer's features.
 
         Args:
-            frame: Must carry the columns in :data:`FEATURES` except ``base_logit``.
+            frame: Must carry the columns in :data:`FEATURES` except ``base_logit``. If it also
+                carries ``n_current`` (current-season matches played), the correction fades with
+                it — see :func:`evidence_weight`.
             p_full: Base model probabilities of a full appearance.
         """
         design = build_design(frame, p_full)
         shift = design @ self.coefficients.to_numpy() + self.intercept - design[:, 0]
         # The first coefficient scales the base logit; express the result as base + bounded shift
         # so the cap has a clear meaning and the base model is never discarded outright.
-        adjusted = design[:, 0] + np.clip(shift, -MAX_SHIFT, MAX_SHIFT)
-        return _sigmoid(adjusted)
+        bounded = np.clip(shift, -MAX_SHIFT, MAX_SHIFT)
+        if "n_current" in frame.columns:
+            bounded = bounded * evidence_weight(
+                pd.to_numeric(frame["n_current"], errors="coerce").fillna(0.0).to_numpy()
+            )
+        return _sigmoid(design[:, 0] + bounded)
+
+
+def evidence_weight(n_current: np.ndarray) -> np.ndarray:
+    """How much of the layer's correction to apply, given current-season matches played.
+
+    The layer exists to stand in for evidence the base model lacks in August. Once a player has
+    real minutes this season the base model has better evidence than ownership or friendlies,
+    and the layer — fitted when the base model was blind — over-corrects it. On gameweek 2 the
+    base model alone scored a Brier of 0.092; applying the gameweek-1 layer at full strength took
+    it to 0.119, at ``1/(1+n)`` to 0.101, and at ``1/(1+n)^2`` to 0.096. Squared is the choice:
+    it keeps the full correction before the first match and makes it a footnote after the third.
+    """
+    n = np.clip(np.asarray(n_current, dtype="float64"), 0.0, None)
+    return 1.0 / (1.0 + n) ** 2
 
 
 def build_design(frame: pd.DataFrame, p_full: np.ndarray) -> np.ndarray:

@@ -101,6 +101,10 @@ def scored_frame(con, season: str = CURRENT_SEASON, upto_gw: int | None = None) 
         )
         SELECT
             l.gw, l.element, l.p_full, l.p_cameo, l.p_none, l.expected_points,
+            -- The base model's own probability is what the layer recalibrates. Projections made
+            -- before it was recorded (gameweek 1's reconstruction) had no layer applied, so their
+            -- final probability is the base one.
+            COALESCE(l.p_full_base, l.p_full) AS p_full_base,
             pl.web_name,
             CASE pl.element_type WHEN 1 THEN 'GKP' WHEN 2 THEN 'DEF'
                                  WHEN 3 THEN 'MID' ELSE 'FWD' END AS position,
@@ -234,9 +238,11 @@ def run(
 
     layer = None
     if fit_adjustment:
+        # Calibration above scores what was actually projected; the layer is fitted against the
+        # base model's own probability so it never learns to correct its own previous correction.
         layer = adjust_module.fit(
             frame,
-            predicted,
+            frame["p_full_base"].to_numpy(dtype="float64"),
             actual,
             gameweeks=tuple(sorted(frame["gw"].unique().tolist())),
         )

@@ -229,6 +229,7 @@ CREATE TABLE IF NOT EXISTS projections (
     p_none        DOUBLE,
     p_cameo       DOUBLE,
     p_full        DOUBLE,
+    p_full_base   DOUBLE,   -- the base minutes model alone, before recalibration and lineup tilt
     expected_points DOUBLE,
     ep_p10        DOUBLE,
     ep_p90        DOUBLE,
@@ -245,7 +246,17 @@ def connect(path: Path | str = DB_PATH, *, read_only: bool = False) -> duckdb.Du
     con = duckdb.connect(str(path), read_only=read_only)
     if not read_only:
         con.execute(SCHEMA)
+        for statement in MIGRATIONS:
+            con.execute(statement)
     return con
+
+
+# Additive changes to tables that already exist on disk. ``CREATE TABLE IF NOT EXISTS`` leaves an
+# existing table's columns alone, so a column added to the schema after a warehouse was built has
+# to be applied separately. Each statement must be idempotent.
+MIGRATIONS = (
+    "ALTER TABLE projections ADD COLUMN IF NOT EXISTS p_full_base DOUBLE",
+)
 
 
 @contextmanager

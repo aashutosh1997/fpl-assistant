@@ -348,11 +348,20 @@ def _solve_tilt(probabilities: np.ndarray, target: float, iterations: int = 80) 
     return (low + high) / 2
 
 
+# Expected players per team-match who reach sixty minutes. Eleven start, but ``p_full`` is the
+# probability of a *full* appearance and roughly one starter in fourteen is withdrawn before the
+# hour: P(60+ | started) is 0.93 in every season 2022-26 and the count of sixty-minute appearances
+# per team-match runs 10.28-10.33. Forcing the sum to eleven predicted 220 such appearances in each
+# of the first two 2026/27 gameweeks against 210 and 209 actual, and dilutes every player's share
+# of his team's goals by the same seven percent.
+FULL_APPEARANCES_PER_TEAM = 10.3
+
+
 def calibrate_to_lineup(
     probabilities: pd.DataFrame,
     team_match: pd.Series,
     *,
-    starters: float = 11.0,
+    starters: float = FULL_APPEARANCES_PER_TEAM,
     substitutes: float = 3.0,
 ) -> pd.DataFrame:
     """Rescale minutes probabilities so each team fields a legal number of players.
@@ -360,7 +369,8 @@ def calibrate_to_lineup(
     The model predicts each player independently, which means nothing stops it from expecting
     seventeen players on the pitch for one club and seven for another. Measured across a real
     gameweek the spread was 7.2 to 17.7 expected players per team, against a true value of eleven
-    starters plus three substitutes.
+    starters plus three substitutes (see :data:`FULL_APPEARANCES_PER_TEAM` for why the target
+    for the sixty-minute class is a little under eleven).
 
     That is not a cosmetic problem. The simulator distributes a team's goals among its players in
     proportion to rate times minutes, so an inflated squad-wide minutes total dilutes every

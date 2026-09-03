@@ -8,7 +8,11 @@ from __future__ import annotations
 
 import pandas as pd
 
-from fplass.features.minutes import apply_availability, calibrate_to_lineup
+from fplass.features.minutes import (
+    FULL_APPEARANCES_PER_TEAM,
+    apply_availability,
+    calibrate_to_lineup,
+)
 
 
 def predictions(rows):
@@ -60,8 +64,15 @@ def test_ruled_out_players_cannot_play():
     assert (after["p_none"] > 0.999).all()
 
 
-def test_lineup_calibration_hits_eleven_and_three():
-    """Each club must field eleven starters and three substitutes, not seventeen or seven."""
+def test_lineup_calibration_hits_the_measured_lineup():
+    """Each club must field about ten full appearances and three substitutes, not 17 or 7.
+
+    The target for the sixty-minute class is 10.3 rather than eleven: one starter in fourteen is
+    withdrawn before the hour, measured at 10.28-10.33 per team-match in every season 2022-26.
+    Forcing eleven predicted 220 full appearances in each of the first two 2026/27 gameweeks
+    against 210 and 209 actual.
+    """
+    assert 10.2 <= FULL_APPEARANCES_PER_TEAM <= 10.4
     # Two clubs with very different squad sizes and confidence spreads. Both are large enough
     # to field eleven starters and three substitutes, as every real Premier League squad is.
     rows = [[0.2, 0.2, 0.6]] * 34 + [[0.7, 0.15, 0.15]] * 22
@@ -70,7 +81,7 @@ def test_lineup_calibration_hits_eleven_and_three():
 
     for club in ("a", "b"):
         mask = groups == club
-        assert abs(after.loc[mask.values, "p_full"].sum() - 11.0) < 0.6
+        assert abs(after.loc[mask.values, "p_full"].sum() - FULL_APPEARANCES_PER_TEAM) < 0.05
         assert abs(after.loc[mask.values, "p_cameo"].sum() - 3.0) < 0.4
 
     # Still a valid probability distribution.

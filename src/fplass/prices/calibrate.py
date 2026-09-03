@@ -36,6 +36,10 @@ log = logging.getLogger(__name__)
 # hours out says much less than one taken an hour before the price moves.
 PRE_DEADLINE_HOURS = 3.0
 
+# Smallest |price_change_percent| from which a player's transfer threshold is inferred when
+# extrapolating; below it the ratio of net transfers to percent is dominated by rounding.
+MIN_PERCENT_FOR_THRESHOLD = 5.0
+
 
 @dataclass(slots=True)
 class PriceModel:
@@ -259,17 +263,33 @@ def official_projection(
         by a number up to five.
 
     ``price_change_hourly_rate``
-        How fast the percent is moving, which is what lets an in-progress reading be extrapolated
-        to the deadline rather than read as if it were final.
+        **Net transfers per hour**, not percent per hour. Across 17,000 pairs of same-day
+        snapshots it tracks the observed change in ``transfers_in_event - transfers_out_event``
+        per hour with correlation 0.85 and slope 1.2, and has essentially no direct relation to
+        the change in percent (0.12). Reading it as percent per hour — as this function first
+        did — projected Mbeumo's -479 an hour to thousands of percent and flagged 727 rises for
+        the 18 that happened.
+
+        To turn it into percent it has to be divided by the player's own threshold, which the
+        same snapshot exposes: ``percent`` is ``net_event_transfers / threshold * 100``, so the
+        threshold is ``100 * net / percent``. It scales with ownership (roughly 23,000 net
+        transfers per ownership point), which is why a fixed constant would not do.
 
     Because the threshold is explicit there is nothing to fit: the probability of a move is a
     function of how far the projected percent lands past 100. The logistic model in :func:`fit`
     remains useful for learning how *reliable* these fields turn out to be, but it is no longer
     required to interpret them.
 
+    FPL's published next-day projection (``proj0_percent``) is preferred wherever it exists: over
+    the first nine change windows it flagged 16 of 18 rises and 94 of 104 falls at 0.89
+    precision, while our own extrapolation from the hourly rate, even correctly converted, ran
+    at 0.73 — the rate decays through the evening and a straight line overshoots. Extrapolation
+    is therefore only used for players FPL publishes no projection for.
+
     Args:
-        hours_to_deadline: Hours until the next daily price change. When supplied, the current
-            percent is extrapolated forward at the hourly rate.
+        hours_to_deadline: Hours until the next daily price change. When supplied, players
+            without a published projection have their percent extrapolated forward at the hourly
+            rate, converted through their implied threshold.
     """
     frame = snapshot.copy()
 
@@ -280,14 +300,21 @@ def official_projection(
 
     percent = column("price_change_percent")
     rate = column("price_change_hourly_rate")
+    published = column("proj0_percent")
+    has_published = published != 0
+    projected = np.where(has_published, published, percent)
 
-    projected = percent.copy()
     if hours_to_deadline is not None and hours_to_deadline > 0:
-        projected = percent + rate * hours_to_deadline
-    else:
-        # Fall back to FPL's own next-day projection where it is present.
-        published = column("proj0_percent")
-        projected = np.where(published != 0, published, percent)
+        net = column("transfers_in_event") - column("transfers_out_event")
+        # Below a few percent the ratio is noise; those players are nowhere near a move anyway.
+        implied = np.abs(percent) >= MIN_PERCENT_FOR_THRESHOLD
+        with np.errstate(divide="ignore", invalid="ignore"):
+            threshold = np.where(implied, 100.0 * net / percent, np.nan)
+        # A threshold must be positive: net transfers and percent share a sign by construction,
+        # and a disagreement means the fields were captured mid-update.
+        usable = ~has_published & implied & np.isfinite(threshold) & (threshold > 0)
+        extrapolated = percent + rate * hours_to_deadline * 100.0 / np.where(usable, threshold, 1.0)
+        projected = np.where(usable, extrapolated, projected)
 
     # A soft threshold rather than a step: the percent is an estimate and players sitting just
     # short of 100 do sometimes tip over before the deadline.

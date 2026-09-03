@@ -118,7 +118,7 @@ def fit_minutes_adjustment(
     frame = calibrate_live.attach_ownership(frame)
     return adjust_module.fit(
         frame,
-        frame["p_full"].to_numpy(dtype="float64"),
+        frame["p_full_base"].to_numpy(dtype="float64"),
         frame["played_full"].to_numpy(dtype="float64"),
         gameweeks=tuple(sorted(int(g) for g in frame["gw"].unique())),
     )
@@ -193,8 +193,14 @@ def live_player_table(con, client=None, season: str = CURRENT_SEASON) -> pd.Data
     )
 
 
-def player_form(con, season: str = CURRENT_SEASON, *, lookback: int = 10) -> pd.DataFrame:
+def player_form(
+    con, season: str = CURRENT_SEASON, *, lookback: int = 10, before_gw: int | None = None
+) -> pd.DataFrame:
     """Each current player's rolling-form features, handling the season boundary properly.
+
+    ``before_gw`` restricts the current season to gameweeks strictly before it, so a projection
+    for a played gameweek can be rebuilt without seeing that gameweek's minutes. Without it a
+    "re-projection" of gameweek 2 after ingesting gameweek 2 is scored against its own inputs.
 
     Form has to be carried across the summer on the stable player ``code``, or every projection
     made in August would treat the whole league as debutants. But carrying it *literally* — taking
@@ -239,6 +245,7 @@ def player_form(con, season: str = CURRENT_SEASON, *, lookback: int = 10) -> pd.
             JOIN player_gw_as_of p
                 ON p.season = pl_hist.season AND p.element = pl_hist.element
             WHERE pl_now.season = ?
+              AND (p.season <> ? OR p.gw < ?)
         ),
         current AS (
             SELECT
@@ -301,22 +308,36 @@ def player_form(con, season: str = CURRENT_SEASON, *, lookback: int = 10) -> pd.
         FROM current c
         FULL OUTER JOIN prior p ON p.element = c.element
         """,
-        [season, season, season],
+        [season, season, before_gw if before_gw is not None else 10**6, season, season],
     ).fetchdf()
 
     return _blend_form(frame, lookback=lookback)
 
 
 def _blend_form(frame: pd.DataFrame, *, lookback: int) -> pd.DataFrame:
-    """Blend current-season form with last season's role, weighted by evidence.
+    """Use this season's form once it exists; last season's role only before it does.
 
-    The weight on current-season data rises with the number of matches played, reaching 1 once a
-    player has ``lookback`` matches behind him. Before that, last season's season-long involvement
-    fills the gap — as an average, never as a single most-recent match.
+    ``lookback`` is retained for the caller's signature but no longer blends: the switch is a step
+    at the first current-season match, not a ramp over ten.
+
+    The ramp was a train/serve mismatch, and an expensive one. The minutes model is fitted on
+    within-season windows (:func:`fplass.features.minutes.build_features`): at a player's second
+    match of a season ``minutes_last`` *is* his first match and every rolling average is that one
+    match too. Serving a 10%/90% blend of that match with last season's average is a feature
+    distribution the model never saw in training. Measured on gameweek 2 it had Kinsky at 0.06 to
+    play an hour after playing ninety in gameweek 1, and Dubravka at 0.79 after playing none.
+    Mirroring training — pure current-season features once one match exists — took the base
+    model's Brier from 0.157 to 0.092 on that gameweek, better than its historical backtest, and
+    cut the error on summer transfers by more than half.
+
+    Before the first match there is no current season to mirror, and the prior season's
+    season-long *averages* stand in — averages rather than the literal final matches, because the
+    end of a season is the least representative part of it (Haaland's last five of 2025-26 made
+    him a 54% starter).
     """
     out = pd.DataFrame({"element": frame["element"]})
     n_current = frame["n_current"].fillna(0).to_numpy(dtype="float64")
-    weight = np.clip(n_current / max(lookback, 1), 0.0, 1.0)
+    weight = np.where(n_current >= 1, 1.0, 0.0)
 
     def blend(current_column: str, prior_column: str) -> np.ndarray:
         current = pd.to_numeric(frame[current_column], errors="coerce").to_numpy(dtype="float64")
@@ -336,13 +357,24 @@ def _blend_form(frame: pd.DataFrame, *, lookback: int) -> pd.DataFrame:
     # Across a season break the "last match" features fall back to the prior season *average*,
     # not its final match, which is the correction that stopped rating Haaland a rotation risk.
     out["minutes_last"] = blend("cur_minutes_last", "prior_minutes")
-    out["minutes_prev"] = blend("cur_minutes_prev", "prior_minutes")
+    # The match before last only exists from the second current-season match; until then the
+    # prior-season average stands in, exactly as it does for minutes_last before the first.
+    out["minutes_prev"] = np.where(
+        n_current >= 2,
+        pd.to_numeric(frame["cur_minutes_prev"], errors="coerce").fillna(0.0),
+        pd.to_numeric(frame["prior_minutes"], errors="coerce").fillna(0.0),
+    )
     out["started_last"] = blend("cur_started_last", "prior_start_rate")
 
     out["last_kickoff"] = frame["cur_last_kickoff"].fillna(frame["prior_last_kickoff"])
     out["last_value"] = pd.to_numeric(
         frame["cur_last_value"].fillna(frame["prior_last_value"]), errors="coerce"
     )
+    # Training counts matches within the season, so ``debut_window`` fires for everyone's first
+    # three matches each August. A player with last season behind him is not a debutant in the
+    # sense the feature means, though — the model has his role from ``prior_*`` — so count prior
+    # matches too and let the flag mark only genuine newcomers.
+    out["n_current"] = n_current
     out["matches_so_far"] = n_current + frame["n_prior"].fillna(0).to_numpy()
     return out
 
@@ -353,6 +385,7 @@ def build_projection_inputs(
     gameweeks: list[int],
     *,
     availability: pd.DataFrame | None = None,
+    as_of_gameweek: int | None = None,
 ) -> tuple[pd.DataFrame, np.ndarray]:
     """Build the player-match frame and minutes probabilities for the requested gameweeks.
 
@@ -360,6 +393,10 @@ def build_projection_inputs(
         availability: Optional live ``element``/``status``/``chance_of_playing_next_round`` frame.
             Applied on top of the model's historical-pattern prediction, since per-gameweek
             availability was never recorded historically and so cannot be learned.
+        as_of_gameweek: Build the inputs as they would have looked before this gameweek's
+            deadline, ignoring any current-season results from it onward. Defaults to the first
+            requested gameweek, which is the right answer for a live plan and the honest one for
+            re-scoring a played gameweek.
 
     Returns:
         The player-match frame and its aligned ``(n_rows, 3)`` minutes probabilities.
@@ -368,7 +405,8 @@ def build_projection_inputs(
     players = current_players(con, season)
     fixtures = teams_module.fixture_rates(con, models.strength, season)
 
-    form = player_form(con, season)
+    before = as_of_gameweek if as_of_gameweek is not None else min(gameweeks)
+    form = player_form(con, season, before_gw=before)
     players = players.merge(form, on="element", how="left")
 
     # Player scoring rates join on the stable code, so a summer transfer keeps his history.
@@ -405,12 +443,18 @@ def build_projection_inputs(
             chance_of_playing=merged.get("chance_of_playing_next_round"),
         )
 
+    # The base model's own view, before recalibration and the lineup constraint. Stored alongside
+    # the final probability so the recalibration layer is always fitted against the base model
+    # rather than against its own previous output.
+    probabilities = probabilities.reset_index(drop=True)
+    player_matches = player_matches.reset_index(drop=True)
+    player_matches["p_full_base"] = probabilities["p_full"].to_numpy(dtype="float64")
+
     # Recalibrate on this season's evidence — preseason minutes and ownership — before the lineup
     # constraint, so the constraint is enforced on the corrected probabilities rather than being
-    # undone by them.
+    # undone by them. The correction fades as current-season matches accumulate.
     if models.minutes_adjustment is not None:
         features = _adjustment_features(con, player_matches, season)
-        probabilities = probabilities.reset_index(drop=True)
         adjusted = models.minutes_adjustment.apply(
             features, probabilities["p_full"].to_numpy(dtype="float64")
         )
@@ -442,7 +486,8 @@ def _adjustment_features(con, player_matches: pd.DataFrame, season: str) -> pd.D
     """Preseason and ownership features aligned to the player-match rows."""
     from ..ingest import preseason as preseason_module
 
-    base = player_matches[["element"]].reset_index(drop=True)
+    columns = ["element"] + (["n_current"] if "n_current" in player_matches.columns else [])
+    base = player_matches[columns].reset_index(drop=True)
     try:
         pre = preseason_module.player_features(con, season)
         base = base.merge(pre, on="element", how="left")
@@ -462,7 +507,7 @@ def _adjustment_features(con, player_matches: pd.DataFrame, season: str) -> pd.D
     else:
         base["log_ownership"] = 0.0
 
-    for column in ("preseason_minutes_avg", "preseason_observed", "preseason_matches"):
+    for column in ("preseason_minutes_avg", "preseason_observed", "preseason_matches", "n_current"):
         if column not in base.columns:
             base[column] = 0.0
         base[column] = pd.to_numeric(base[column], errors="coerce").fillna(0.0)
@@ -587,7 +632,7 @@ def project(
     return result, player_matches, models
 
 
-MODEL_VERSION = "2026-27.2"
+MODEL_VERSION = "2026-27.3"
 
 
 def store_projection(
@@ -613,10 +658,22 @@ def store_projection(
     # Collapse to one row per (element, gameweek): a double gameweek produces two player-match rows
     # but a single prediction per gameweek is what gets scored.
     probs = minutes_probabilities.reset_index(drop=True)
-    frame = player_matches.reset_index(drop=True)[["element", "event"]].copy()
+    matches = player_matches.reset_index(drop=True)
+    frame = matches[["element", "event"]].copy()
     frame[["p_none", "p_cameo", "p_full"]] = probs[list(minutes_module.CLASS_LABELS)].to_numpy()
+    # The base model's probability before recalibration, when the inputs carry it. The layer must
+    # be fitted on this, not on ``p_full``: fitting on the final probability from gameweek 2 on
+    # would stack the layer on its own previous output.
+    frame["p_full_base"] = (
+        pd.to_numeric(matches["p_full_base"], errors="coerce")
+        if "p_full_base" in matches.columns
+        else frame["p_full"]
+    )
     per_gw = frame.groupby(["element", "event"], as_index=False).agg(
-        p_none=("p_none", "mean"), p_cameo=("p_cameo", "mean"), p_full=("p_full", "max")
+        p_none=("p_none", "mean"),
+        p_cameo=("p_cameo", "mean"),
+        p_full=("p_full", "max"),
+        p_full_base=("p_full_base", "max"),
     )
 
     expected = result.expected_points

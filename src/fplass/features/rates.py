@@ -63,6 +63,24 @@ EXPECTED_RATES = {
     "xgc": "expected_goals_conceded",
 }
 
+# Per-stat exposure columns on the totals frame: ``min_<count column>`` holds the (recency-weighted)
+# minutes played in seasons that actually published that stat, which is the only correct
+# denominator for a rate whose numerator skips the seasons that did not.
+MINUTES_PREFIX = "min_"
+
+
+def exposure_column(count_column: str) -> str:
+    """Name of the per-stat minutes column for ``count_column``."""
+    return f"{MINUTES_PREFIX}{count_column}"
+
+
+def _exposure(frame: pd.DataFrame, count_column: str) -> pd.Series:
+    """Minutes over which ``count_column`` was observed, falling back to all minutes."""
+    column = exposure_column(count_column)
+    if column in frame.columns:
+        return pd.to_numeric(frame[column], errors="coerce").fillna(0.0)
+    return pd.to_numeric(frame["minutes"], errors="coerce").fillna(0.0)
+
 
 @dataclass(slots=True)
 class RatePriors:
@@ -146,9 +164,14 @@ def player_totals(
     frame["position"] = frame["position"].replace({"GK": "GKP"})
     weighted = frame.assign(w_minutes=frame["minutes"] * frame["weight"])
     for column in list(COUNT_RATES.values()) + list(EXPECTED_RATES.values()):
-        weighted[f"w_{column}"] = (
-            pd.to_numeric(weighted[column], errors="coerce") * weighted["weight"]
-        )
+        values = pd.to_numeric(weighted[column], errors="coerce")
+        weighted[f"w_{column}"] = values * weighted["weight"]
+        # Exposure for *this* stat: only the minutes in seasons that published it. Summing the
+        # counts (NaN seasons drop out) while dividing by every season's minutes halved the DEFCON
+        # rate of anyone with pre-2025 history — Virgil came out at 4.9 per 90 against a true 9.1
+        # — and quietly cost defenders half a point a match in the projections. xG, published from
+        # 2022-23, was diluted the same way for veterans.
+        weighted[f"{MINUTES_PREFIX}{column}"] = np.where(values.isna(), 0.0, weighted["w_minutes"])
 
     aggregations = {
         "minutes": ("w_minutes", "sum"),
@@ -158,6 +181,7 @@ def player_totals(
     }
     for column in list(COUNT_RATES.values()) + list(EXPECTED_RATES.values()):
         aggregations[column] = (f"w_{column}", "sum")
+        aggregations[f"{MINUTES_PREFIX}{column}"] = (f"{MINUTES_PREFIX}{column}", "sum")
 
     # A player's position is whichever one he has played most of his recent minutes in; FPL
     # reclassifies players between seasons and occasionally mid-season.
@@ -211,12 +235,14 @@ def fit_priors(totals: pd.DataFrame, *, min_group: int = 15) -> RatePriors:
         return (alpha, beta)
 
     def observed(group: pd.DataFrame, count_column: str) -> tuple[np.ndarray, np.ndarray] | None:
-        nineties = group["minutes"] / 90.0
-        usable = group[(nineties > 2) & group[count_column].notna()]
-        if len(usable) < 3:
+        # Exposure is the minutes in seasons that published this stat, not all minutes: a prior
+        # fitted on diluted rates is diluted itself, and then shrinks everyone toward the error.
+        nineties = _exposure(group, count_column) / 90.0
+        usable = (nineties > 2) & group[count_column].notna()
+        if usable.sum() < 3:
             return None
-        rates = (usable[count_column] / (usable["minutes"] / 90.0)).to_numpy(dtype="float64")
-        return rates, (usable["minutes"] / 90.0).to_numpy(dtype="float64")
+        rates = (group.loc[usable, count_column] / nineties[usable]).to_numpy(dtype="float64")
+        return rates, nineties[usable].to_numpy(dtype="float64")
 
     all_rates = {**COUNT_RATES, **EXPECTED_RATES}
     for rate, column in all_rates.items():
@@ -257,7 +283,6 @@ def shrink(totals: pd.DataFrame, priors: RatePriors, *, xg_weight: float = 0.75)
             elite finisher is not flattened to average.
     """
     out = totals[["code", "position", "price_tier", "minutes", "raw_minutes", "thin_sample"]].copy()
-    nineties = (totals["minutes"] / 90.0).to_numpy(dtype="float64")
 
     for rate, column in {**COUNT_RATES, **EXPECTED_RATES}.items():
         events = pd.to_numeric(totals[column], errors="coerce").to_numpy(dtype="float64")
@@ -268,16 +293,21 @@ def shrink(totals: pd.DataFrame, priors: RatePriors, *, xg_weight: float = 0.75)
         ):
             alpha[i], beta[i] = priors.get(str(position), str(tier), rate)
 
-        # Where a season published no value for this stat the count is NaN; falling back to the
-        # prior mean is right, since the events are unobserved rather than absent.
+        # The exposure is the minutes in seasons that published this stat. Where none did, the
+        # count is NaN and the exposure zero, so the player sits at the prior mean — the events
+        # are unobserved rather than absent.
         observed_events = np.nan_to_num(events, nan=0.0)
-        observed_nineties = np.where(np.isnan(events), 0.0, nineties)
+        observed_nineties = (_exposure(totals, column) / 90.0).to_numpy(dtype="float64")
+        observed_nineties = np.where(np.isnan(events), 0.0, observed_nineties)
         out[rate] = (alpha + observed_events) / (beta + observed_nineties)
 
     # Blend expected and actual for the two rates where both exist. Where xG was never published
     # for a player, the prior-driven xg estimate carries no information about him specifically, so
     # lean on the goal rate instead.
-    has_xg = pd.to_numeric(totals["expected_goals"], errors="coerce").notna().to_numpy()
+    has_xg = (
+        pd.to_numeric(totals["expected_goals"], errors="coerce").notna()
+        & (_exposure(totals, "expected_goals") > 0)
+    ).to_numpy()
     weight = np.where(has_xg, xg_weight, 0.0)
     out["goal_rate"] = weight * out["xg"] + (1 - weight) * out["goals"]
     out["assist_rate"] = weight * out["xa"] + (1 - weight) * out["assists"]
