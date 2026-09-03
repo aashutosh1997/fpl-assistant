@@ -311,9 +311,10 @@ def solve(
     )
     hits = pulp.LpVariable.dicts("hits", gameweeks, lowBound=0, cat="Integer")
     # Free transfers spent in each gameweek (see the transfer economy below).
-    used = pulp.LpVariable.dicts(
-        "used_ft", gameweeks, lowBound=0, upBound=MAX_BANKED_TRANSFERS, cat="Integer"
-    )
+    # Bounded by the squad size, not the bank cap: the pre-season build starts with fifteen.
+    used = pulp.LpVariable.dicts("used_ft", gameweeks, lowBound=0, upBound=SQUAD_SIZE, cat="Integer")
+    # 1 when more transfers are made than there are free ones (so all free ones are spent).
+    fewer_free = pulp.LpVariable.dicts("fewer_free", gameweeks, cat="Binary")
 
     # ---------------------------------------------------------------- squad rules
 
@@ -415,7 +416,15 @@ def solve(
         # with the small bonus on banked transfers, nudged plans toward paying hits early.
         problem += used[gw] <= made
         problem += used[gw] <= available
-        problem += used[gw] <= MAX_BANKED_TRANSFERS * (1 - unlimited)
+        problem += used[gw] <= SQUAD_SIZE * (1 - unlimited)
+        # ...and no fewer than that: free transfers are always consumed before a hit is paid.
+        # Without the lower bound the solver could decline to spend a free transfer, pay a hit
+        # instead and bank the free one for later — legal in the algebra, not in the game.
+        # `min(made, available)` is linearised with one binary per gameweek.
+        problem += used[gw] >= made - SQUAD_SIZE * fewer_free[gw] - SQUAD_SIZE * unlimited
+        problem += (
+            used[gw] >= available - SQUAD_SIZE * (1 - fewer_free[gw]) - SQUAD_SIZE * unlimited
+        )
 
         # Hits are exactly the transfers beyond the free ones spent (never under a chip).
         # SQUAD_SIZE is a safe big-M: you cannot make more than fifteen transfers.

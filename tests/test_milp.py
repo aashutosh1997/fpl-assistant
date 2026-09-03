@@ -351,10 +351,25 @@ def test_hits_are_exactly_the_transfers_beyond_the_free_ones(points, universe, w
     for star in stars:
         boosted.loc[star, GAMEWEEKS[0]] += 50.0
 
-    plan = solve_scenario(boosted, universe, held, windows, allow_chips=False)
+    # A large value on banked transfers tempts the solver to pay a hit instead of spending the
+    # free transfer and carry it forward; the game does not allow that.
+    plan = solve_scenario(
+        boosted, universe, held, windows, allow_chips=False, banked_transfer_value=3.0
+    )
     first = GAMEWEEKS[0]
     assert set(stars) <= set(plan.transfers_in[first])
     assert plan.hits[first] == len(plan.transfers_in[first]) - 1
+    # And with the free transfer spent, next week starts with exactly one again: a second
+    # gameweek of two transfers must cost one hit.
+    boosted.loc[stars[0], GAMEWEEKS[1]] -= 50.0
+    extra = universe[~universe["element"].isin(squad)].nlargest(2, "price")["element"]
+    for star in extra:
+        boosted.loc[star, GAMEWEEKS[1]] += 50.0
+    plan = solve_scenario(
+        boosted, universe, held, windows, allow_chips=False, banked_transfer_value=3.0
+    )
+    for gw in GAMEWEEKS[:2]:
+        assert plan.hits[gw] == max(len(plan.transfers_in[gw]) - 1, 0), plan.summary({})
 
 
 def test_wildcard_is_valued_against_the_chip_free_plan(points, universe, windows):
