@@ -406,3 +406,16 @@ def test_wildcard_is_valued_against_the_chip_free_plan(points, universe, windows
 
     used = SquadState(players=held.players, bank=held.bank, free_transfers=1, chips_used={"wildcard:0"})
     assert chips.value_wildcard(boosted, universe, used, windows, baseline, candidates=1) == []
+
+
+def test_lineups_summary_shows_every_starter_and_the_bench(points, universe, windows):
+    state = SquadState(players={}, bank=1000, free_transfers=15)
+    plan = solve_scenario(points, universe, state, windows, allow_chips=False)
+    names = dict(zip(universe["element"], universe["web_name"], strict=True))
+    positions = dict(zip(universe["element"], universe["position"], strict=True))
+    text = plan.lineups_summary(names, positions, points)
+    first = GAMEWEEKS[0]
+    for e in plan.lineups[first]:
+        assert names[e] in text
+    assert text.count("(C)") == len(GAMEWEEKS)
+    assert text.count("bench:") == len(GAMEWEEKS)

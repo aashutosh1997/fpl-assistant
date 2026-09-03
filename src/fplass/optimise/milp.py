@@ -149,6 +149,48 @@ class Plan:
             )
         return "\n".join(lines)
 
+    def lineups_summary(
+        self,
+        names: dict[int, str],
+        positions: dict[int, str],
+        expected_points: "pd.DataFrame | None" = None,
+    ) -> str:
+        """Each gameweek's starting eleven by position, the bench, and the moves that got there.
+
+        This is the view a manager actually checks a plan against: who starts, who sits, and
+        whether the bench is rotating into the side or dead weight. Per-player expected points
+        are shown when ``expected_points`` (players by gameweek) is given.
+        """
+        order = ("GKP", "DEF", "MID", "FWD")
+
+        def label(e: int, gw: int) -> str:
+            name = names.get(e, str(e))
+            if expected_points is not None and e in expected_points.index and gw in expected_points.columns:
+                name += f" {float(expected_points.at[e, gw]):.1f}"
+            return name
+
+        lines = []
+        for gw in sorted(self.squads):
+            lineup = [e for e in self.lineups.get(gw, [])]
+            bench = [e for e in self.squads.get(gw, []) if e not in set(lineup)]
+            captain = self.captains.get(gw)
+            chip = f" [{self.chips[gw].upper()}]" if gw in self.chips else ""
+            out = ", ".join(names.get(e, str(e)) for e in self.transfers_out.get(gw, []))
+            into = ", ".join(names.get(e, str(e)) for e in self.transfers_in.get(gw, []))
+            hit = f" (-{self.hits.get(gw, 0) * int(HIT_COST)})" if self.hits.get(gw) else ""
+            move = f"{out} -> {into}{hit}" if into or out else "roll"
+            lines.append(f"GW{gw}{chip}: {move}")
+            for position in order:
+                players = [e for e in lineup if positions.get(e) == position]
+                if not players:
+                    continue
+                shown = ", ".join(
+                    label(e, gw) + (" (C)" if e == captain else "") for e in players
+                )
+                lines.append(f"  {position}: {shown}")
+            lines.append("  bench: " + ", ".join(label(e, gw) for e in bench))
+        return "\n".join(lines)
+
 
 def _best_solver(*, msg: bool, time_limit: int):
     """Pick the fastest available solver.

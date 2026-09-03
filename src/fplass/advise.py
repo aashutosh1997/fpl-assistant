@@ -514,6 +514,15 @@ def format_report(recommendation: Recommendation) -> str:
     lines += ["", recommendation.roadmap.summary()]
     lines += ["", "PLAN", recommendation.plan.summary(names)]
 
+    positions = dict(
+        zip(recommendation.players["element"], recommendation.players["position"], strict=True)
+    )
+    lines += [
+        "",
+        "LINEUPS",
+        recommendation.plan.lineups_summary(names, positions, recommendation.expected_points),
+    ]
+
     if recommendation.league_metrics:
         lines += ["", "LEAGUE"]
         for key, value in recommendation.league_metrics.items():
