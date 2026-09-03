@@ -326,3 +326,32 @@ def test_objective_is_not_double_counted(points, universe, windows):
     for gw, expected in plan.expected_points.items():
         realistic = points[gw].nlargest(LINEUP_SIZE + 1).sum()
         assert expected <= realistic + 1e-6, f"GW{gw} scores more than its best possible XI"
+
+
+def test_hits_are_exactly_the_transfers_beyond_the_free_ones(points, universe, windows):
+    """Three transfers on one free transfer cost two hits, never three.
+
+    The transfer economy once let the solver take an *extra* hit to bank an extra free transfer
+    — same total cost in the end, but it reported a three-transfer week as -12 and, with the small
+    bonus on banked transfers, nudged plans toward paying hits early.
+    """
+    state = SquadState(players={}, bank=1000, free_transfers=15)
+    opening = solve_scenario(points, universe, state, windows, allow_chips=False)
+    squad = opening.squads[GAMEWEEKS[0]]
+    price = universe.set_index("element")["price"]
+    held = SquadState(
+        players={e: int(price.loc[e]) for e in squad},
+        bank=1000 - int(price.loc[squad].sum()),
+        free_transfers=1,
+    )
+
+    boosted = points.copy()
+    outsiders = universe[~universe["element"].isin(squad)].nsmallest(3, "price")
+    stars = outsiders["element"].tolist()
+    for star in stars:
+        boosted.loc[star, GAMEWEEKS[0]] += 50.0
+
+    plan = solve_scenario(boosted, universe, held, windows, allow_chips=False)
+    first = GAMEWEEKS[0]
+    assert set(stars) <= set(plan.transfers_in[first])
+    assert plan.hits[first] == len(plan.transfers_in[first]) - 1

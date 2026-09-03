@@ -310,6 +310,10 @@ def solve(
         "ft", gameweeks, lowBound=0, upBound=MAX_BANKED_TRANSFERS, cat="Integer"
     )
     hits = pulp.LpVariable.dicts("hits", gameweeks, lowBound=0, cat="Integer")
+    # Free transfers spent in each gameweek (see the transfer economy below).
+    used = pulp.LpVariable.dicts(
+        "used_ft", gameweeks, lowBound=0, upBound=MAX_BANKED_TRANSFERS, cat="Integer"
+    )
 
     # ---------------------------------------------------------------- squad rules
 
@@ -403,14 +407,24 @@ def solve(
 
         available = current.free_transfers if index == 0 else free_transfers[gameweeks[index - 1]]
 
-        # Hits only apply beyond the free transfers available, and never under a wildcard or free
-        # hit. SQUAD_SIZE is a safe big-M: you cannot make more than fifteen transfers.
-        problem += hits[gw] >= made - available - SQUAD_SIZE * unlimited
+        # Free transfers actually spent this week: as many of the transfers made as there were
+        # free ones available, and none at all under a wildcard or free hit, whose transfers are
+        # outside the economy. Modelling this explicitly matters. The earlier form let the solver
+        # take *extra* hits to bank extra free transfers — buying a transfer for four points now
+        # rather than later, which costs the same but reported a three-transfer week as -12 and,
+        # with the small bonus on banked transfers, nudged plans toward paying hits early.
+        problem += used[gw] <= made
+        problem += used[gw] <= available
+        problem += used[gw] <= MAX_BANKED_TRANSFERS * (1 - unlimited)
 
-        # Free transfers accrue one per week, capped, and a wildcard leaves the count untouched
-        # because its transfers are free.
-        problem += free_transfers[gw] <= available + 1
-        problem += free_transfers[gw] <= available + 1 - made + SQUAD_SIZE * unlimited + hits[gw]
+        # Hits are exactly the transfers beyond the free ones spent (never under a chip).
+        # SQUAD_SIZE is a safe big-M: you cannot make more than fifteen transfers.
+        problem += hits[gw] >= made - used[gw] - SQUAD_SIZE * unlimited
+        problem += hits[gw] <= made - used[gw]
+
+        # Free transfers accrue one per week on whatever was not spent, capped by the variable's
+        # bound; a wildcard leaves the count untouched because its transfers are free.
+        problem += free_transfers[gw] <= available - used[gw] + 1
 
         # One chip per gameweek.
         if allow_chips:
