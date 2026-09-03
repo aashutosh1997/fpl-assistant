@@ -344,9 +344,9 @@ def _minutes_risk_notes(
     return [
         "Minutes risk from new signings, already priced into this plan: "
         f"{described}. Their club bought a competitor for the shirt after the last recorded "
-        "gameweek, so their projections were pulled toward the club average until a lineup "
-        "shows who starts. A settled alternative with the same mean is the safer pick, and "
-        "the bench matters more this week."
+        "gameweek. Historically that costs established starters about 4% of their chance of an "
+        "hour in the first match, and nothing after the lineup is seen, so the projections are "
+        "widened by a tenth until then — a nudge toward the settled alternative, not a verdict."
     ]
 
 

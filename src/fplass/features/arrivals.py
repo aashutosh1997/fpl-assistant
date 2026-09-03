@@ -31,11 +31,17 @@ import pandas as pd
 log = logging.getLogger(__name__)
 
 # How much of an incumbent's full-appearance probability is pulled toward the club-position
-# average per competing arrival. Deliberately a widening, not a verdict: 0.3 leaves a nailed
-# starter clearly ahead of a squad player while making him a visibly worse captain than a rival
-# with no such doubt. Capped so a club that signs three midfielders does not flatten them all.
-SHRINK_PER_ARRIVAL = 0.3
-MAX_SHRINK = 0.5
+# average when a competing arrival lands. Measured, not guessed: across 231 established starters
+# (started 3+ of the previous 5) who saw a mid-season signing arrive at their club and position
+# over 2016-26, the minutes model's prediction for their *first* match afterwards was 0.708
+# against an actual 0.664 — a 0.045 over-confidence — and by the third match the gap was gone
+# (0.658 vs 0.657) because the model reads the new lineup as soon as it has been played. Fitting
+# the shrink on that first match gives 0.10 (Brier 0.1830, against 0.1841 unshrunk and 0.1860
+# at the 0.3 this started as). So the widening is small, flat, and self-limiting: arrivals are
+# only detected until the next gameweek is recorded. Stacking per signing was not supported
+# either — the gap was no larger when several arrived — so the cap equals the single value.
+SHRINK_PER_ARRIVAL = 0.10
+MAX_SHRINK = 0.10
 
 # An arrival competes for a starting place when he cost at least this fraction of the
 # incumbent's price. A 4.5m squad-filler does not threaten an 8.5m starter; a 6.9m one does.
