@@ -136,7 +136,7 @@ def detect_arrivals(con, season: str) -> list[Arrival]:
 
 
 def disruption(
-    players: pd.DataFrame, arrivals: list[Arrival], *, per_arrival: float = SHRINK_PER_ARRIVAL
+    players: pd.DataFrame, arrivals: list[Arrival], *, per_arrival: float | None = None
 ) -> pd.Series:
     """Shrink weight in ``[0, MAX_SHRINK]`` per element, indexed like ``players``.
 
@@ -148,8 +148,12 @@ def disruption(
     Args:
         players: Must carry ``element``, ``team_id``, ``position`` and ``price`` (tenths).
     """
+    # Read the module constant at call time, not at definition time, so an experiment that sets
+    # it (or turns the widening off) actually changes the result.
+    if per_arrival is None:
+        per_arrival = SHRINK_PER_ARRIVAL
     weight = pd.Series(0.0, index=players.index)
-    if not arrivals:
+    if not arrivals or per_arrival <= 0:
         return weight
 
     by_club_position: dict[tuple[int, str], list[Arrival]] = {}
