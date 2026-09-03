@@ -41,6 +41,21 @@ MAX_SHRINK = 0.5
 # incumbent's price. A 4.5m squad-filler does not threaten an 8.5m starter; a 6.9m one does.
 COMPETING_PRICE_RATIO = 0.75
 
+# Below this price (tenths) FPL is saying the arrival is a squad player, and he only competes
+# with incumbents priced no higher than himself. Prices are compressed at the bottom of the
+# scale — a 4.5m centre-back is three quarters of a 5.9m one — so the ratio alone would let a
+# deadline-day backup widen an entire settled defence.
+SQUAD_PLAYER_PRICE = 50
+
+
+def competes(arrival_price: int, incumbent_price: float) -> bool:
+    """Whether a signing at ``arrival_price`` threatens an incumbent at ``incumbent_price``."""
+    if arrival_price >= incumbent_price:
+        return True
+    if arrival_price < SQUAD_PLAYER_PRICE:
+        return False
+    return arrival_price >= COMPETING_PRICE_RATIO * incumbent_price
+
 
 @dataclass(slots=True)
 class Arrival:
@@ -147,9 +162,7 @@ def disruption(
             threatened = [c for c in competitors if c.element != int(row["element"])]
             count = max(len(threatened), 0) + 1
         else:
-            count = sum(
-                1 for c in competitors if c.price >= COMPETING_PRICE_RATIO * own_price
-            )
+            count = sum(1 for c in competitors if competes(c.price, own_price))
         weight.at[idx] = min(per_arrival * count, MAX_SHRINK)
     return weight
 

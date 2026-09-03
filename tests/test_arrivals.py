@@ -40,6 +40,15 @@ def test_a_cheap_squad_filler_threatens_nobody():
     assert weight[0] == 0 and weight[1] == 0
 
 
+def test_price_compression_at_the_bottom_of_the_scale():
+    """A 4.5m backup is three quarters of a 5.9m starter's price but not a threat to him."""
+    assert not arrivals.competes(45, 59)
+    assert arrivals.competes(45, 45), "he does compete with someone priced the same"
+    assert arrivals.competes(50, 49)
+    assert arrivals.competes(69, 85), "a 6.9m midfielder threatens an 8.5m one"
+    assert not arrivals.competes(50, 85)
+
+
 def test_widening_preserves_the_group_total_and_spreads_it():
     signing = arrivals.Arrival(3, "arrival", 1, "MID", 69, "transfer from X")
     players = _players()
