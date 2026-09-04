@@ -178,7 +178,12 @@ def test_two_gameweeks_of_a_real_season_replay(con):
         source = candidates[-1]
         seasons = [source.stem]
     replay = manager.replay_season(
-        con, seasons[0], policy="hold", solver_time_limit=10, max_gameweek=2, source=source
+        con,
+        seasons[0],
+        policy="hold",
+        config=manager.PolicyConfig(solver_time_limit=10),
+        max_gameweek=2,
+        source=source,
     )
     assert len(replay.records) == 2
     first = replay.records[0]
