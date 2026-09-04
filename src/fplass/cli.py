@@ -462,6 +462,37 @@ def backtest_options(
     )
 
 
+@backtest_app.command("chips")
+def backtest_chips(
+    policy: str = typer.Option("current", help="Whose traces to measure on."),
+    config: str = typer.Option(None, help="The traces' planner config, as given to `manager`."),
+    panel_version: str = typer.Option(None, help="The panel version the traces were played on."),
+) -> None:
+    """Chip timing: what each chip was worth each week, and how the rules compare."""
+    from .backtest import manager as manager_module
+    from .backtest import panel as panel_module
+    from .ingest.sources import CURRENT_SEASON
+    from .ingest.warehouse import connect
+    from .optimise import milp
+    from .options import chips as chips_module
+
+    settings = manager_module.PolicyConfig.parse(config)
+    tag = manager_module.run_tag(policy, settings, panel_version)
+    traces = sorted(manager_module.BACKTEST.glob(f"manager_{tag}_20*.csv"))
+    if not traces:
+        typer.echo(f"No traces for {tag}. Run `fpl backtest manager` first.")
+        return
+    sources = panel_module.panel_files(panel_version) if panel_version else None
+    con = connect(read_only=True)
+    try:
+        gains = chips_module.chip_gains_from_traces(con, traces, panel_sources=sources)
+        windows = milp.ChipWindows.from_warehouse(con, CURRENT_SEASON)
+    finally:
+        con.close()
+    gains.to_csv(manager_module.BACKTEST / f"chip_gains_{tag}.csv", index=False)
+    typer.echo(chips_module.report(gains, windows))
+
+
 @backtest_app.command("revisions")
 def backtest_revisions(
     panel_version: str = typer.Option(None, help="Read a panel version's files, else the warehouse."),
