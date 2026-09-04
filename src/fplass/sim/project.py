@@ -30,6 +30,7 @@ import pandas as pd
 from ..features import adjust as adjust_module
 from ..features import arrivals as arrivals_module
 from ..features import bps as bps_module
+from ..features import flow as flow_module
 from ..features import minutes as minutes_module
 from ..features import rates as rates_module
 from ..features import teams as teams_module
@@ -57,6 +58,10 @@ class ProjectionModels:
     # been observed to fit it — at which point the base model passes through untouched, which is
     # the honest behaviour when there is nothing to calibrate against.
     minutes_adjustment: adjust_module.MinutesAdjustment | None = None
+    # The order-flow layer: what managers did before the deadline, fitted on ten seasons of
+    # history where it stands in for the availability news that was never recorded. Applied to
+    # the deadline's own gameweek only.
+    flow: flow_module.FlowLayer | None = None
 
 
 def fit_models(
@@ -77,6 +82,7 @@ def fit_models(
 
     features = minutes_module.build_features(con)
     minutes_model, _ = minutes_module.fit(features)
+    flow_layer = flow_module.fit_layer(con, features)
 
     rate_table, _ = rates_module.build(con)
 
@@ -96,6 +102,7 @@ def fit_models(
         rules=rules_for_season(con, season),
         season=season,
         minutes_adjustment=fit_minutes_adjustment(con, season),
+        flow=flow_layer,
     )
 
 
@@ -221,6 +228,7 @@ def live_player_table(con, client=None, season: str = CURRENT_SEASON) -> pd.Data
         if owns_client:
             client.close()
 
+    total_players = bootstrap.get("total_players")
     live = pd.DataFrame(
         [
             {
@@ -232,6 +240,10 @@ def live_player_table(con, client=None, season: str = CURRENT_SEASON) -> pd.Data
                 "selected_by_percent": pd.to_numeric(
                     e.get("selected_by_percent"), errors="coerce"
                 ),
+                # The week's order flow so far, for the flow layer.
+                "transfers_in_event": e.get("transfers_in_event"),
+                "transfers_out_event": e.get("transfers_out_event"),
+                "total_players": total_players,
             }
             for e in bootstrap.get("elements", [])
         ]
@@ -436,6 +448,8 @@ def build_projection_inputs(
     availability: pd.DataFrame | None = None,
     as_of_gameweek: int | None = None,
     historical: bool = False,
+    flow: pd.DataFrame | None = None,
+    flow_max_shift: float | None = None,
 ) -> tuple[pd.DataFrame, np.ndarray]:
     """Build the player-match frame and minutes probabilities for the requested gameweeks.
 
@@ -443,6 +457,12 @@ def build_projection_inputs(
         availability: Optional live ``element``/``status``/``chance_of_playing_next_round`` frame.
             Applied on top of the model's historical-pattern prediction, since per-gameweek
             availability was never recorded historically and so cannot be learned.
+        flow: Live order flow per ``element`` (``flow_out``, ``flow_in``) from
+            :func:`fplass.features.flow.live_flow`. For a historical season the flow is read
+            from the warehouse instead. Applied before the availability ceiling, so a player
+            the market has abandoned is reduced and a player ruled out is still zero.
+        flow_max_shift: Cap on the flow layer's log-odds move; the live path passes a tighter
+            one than the fitted default because its flows are extrapolated from a partial week.
         as_of_gameweek: Build the inputs as they would have looked before this gameweek's
             deadline, ignoring any current-season results from it onward. Defaults to the first
             requested gameweek, which is the right answer for a live plan and the honest one for
@@ -489,6 +509,23 @@ def build_projection_inputs(
 
     features = _projection_features(con, player_matches, season)
     probabilities = models.minutes.predict(features)
+
+    # What managers did before the deadline, for the deadline's gameweek only: the historical
+    # stand-in for availability news, and live a signal on top of it.
+    if models.flow is not None:
+        aligned = None
+        if historical:
+            aligned = flow_module.historical_flow(con, season, before, player_matches)
+        elif flow is not None:
+            aligned = flow_module.align_live(flow, player_matches, before)
+        if aligned is not None:
+            before_flow = probabilities["p_full"].to_numpy(dtype="float64").copy()
+            probabilities = models.flow.apply(
+                probabilities.reset_index(drop=True), aligned, max_shift=flow_max_shift
+            )
+            # Kept so the advisor can say which picks the market moved, and by how much.
+            player_matches = player_matches.reset_index(drop=True)
+            player_matches["flow_shift"] = probabilities["p_full"].to_numpy() - before_flow
 
     if availability is not None:
         merged = player_matches[["element"]].merge(availability, on="element", how="left")
@@ -644,6 +681,8 @@ def project(
     availability: pd.DataFrame | None = None,
     seed: int = 20262027,
     store: bool = False,
+    flow: pd.DataFrame | None = None,
+    flow_max_shift: float | None = None,
 ) -> tuple[SimulationResult, pd.DataFrame, ProjectionModels]:
     """Project the next ``horizon`` gameweeks.
 
@@ -663,7 +702,7 @@ def project(
         raise ValueError(f"no gameweeks remain from {start}")
 
     player_matches, probabilities = build_projection_inputs(
-        con, models, gameweeks, availability=availability
+        con, models, gameweeks, availability=availability, flow=flow, flow_max_shift=flow_max_shift
     )
     log.info(
         "simulating gameweeks %d-%d: %d player-matches, %d draws",

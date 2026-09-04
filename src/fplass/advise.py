@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 
 from .api import FPLAPIError, FPLClient
+from .features import flow as flow_module
 from .ingest.sources import CURRENT_SEASON
 from .optimise import chips as chips_module
 from .optimise import league as league_module
@@ -42,6 +43,11 @@ PLAN_POOL_SIZE = 6
 
 # Everything before this gameweek's deadline is an unlimited squad build, not a transfer week.
 FIRST_GAMEWEEK = 1
+
+# Cap on how far the order-flow layer may move a live probability, in log-odds. The layer is
+# fitted on complete weeks of flow; a live plan sees a partial week extrapolated, so it is held
+# to a smaller move than history would allow (about 0.9 -> 0.77 at most for a nailed starter).
+LIVE_FLOW_MAX_SHIFT = 1.0
 
 
 @dataclass(slots=True)
@@ -198,6 +204,7 @@ def advise(
     # ---- 2. simulate the horizon
     models = models or project.fit_models(con, season=season)
     availability = players[["element", "status", "chance_of_playing_next_round"]]
+    flow = _live_flow(con, players, season, target_gameweek, deadline)
     result, player_matches, models = project.project(
         con,
         models=models,
@@ -208,6 +215,8 @@ def advise(
         # Recorded before the deadline so `fpl calibrate` can score it afterwards. This is the
         # only way the model learns whether its own advice was any good.
         store=True,
+        flow=flow,
+        flow_max_shift=LIVE_FLOW_MAX_SHIFT,
     )
     expected_points = result.expected_points
 
@@ -296,6 +305,7 @@ def advise(
     )
 
     notes.extend(_minutes_risk_notes(chosen, player_matches, players, target_gameweek))
+    notes.extend(_flow_notes(chosen, player_matches, players, target_gameweek))
 
     return Recommendation(
         gameweek=target_gameweek,
@@ -312,6 +322,50 @@ def advise(
         deadline=deadline,
         notes=notes,
     )
+
+
+def _live_flow(
+    con, players: pd.DataFrame, season: str, gameweek: int, deadline: dt.datetime | None
+) -> pd.DataFrame | None:
+    """This week's order flow so far, scaled by how much of the transfer window has passed."""
+    needed = {"transfers_in_event", "transfers_out_event", "selected_by_percent", "total_players"}
+    if not needed <= set(players.columns) or gameweek <= FIRST_GAMEWEEK:
+        return None
+    elapsed = 1.0
+    previous = _deadline(con, season, gameweek - 1)
+    if deadline is not None and previous is not None and deadline > previous:
+        now = dt.datetime.now(dt.UTC)
+        elapsed = (now - previous).total_seconds() / (deadline - previous).total_seconds()
+        elapsed = min(max(elapsed, 0.0), 1.0)
+    return flow_module.live_flow(players, elapsed=elapsed)
+
+
+def _flow_notes(
+    plan: milp.Plan, player_matches: pd.DataFrame, players: pd.DataFrame, gameweek: int
+) -> list[str]:
+    """Name the squad members the market moved this week, so the shift can be argued with."""
+    if "flow_shift" not in player_matches.columns:
+        return []
+    shift = (
+        player_matches[player_matches["event"] == gameweek]
+        .groupby("element")["flow_shift"]
+        .max()
+    )
+    names = players.set_index("element")["web_name"]
+    moved = [
+        (e, float(shift.get(e, 0.0)))
+        for e in plan.squads.get(gameweek, [])
+        if abs(float(shift.get(e, 0.0))) >= 0.05
+    ]
+    if not moved:
+        return []
+    moved.sort(key=lambda item: item[1])
+    described = ", ".join(f"{names.get(e, e)} {w:+.0%}" for e, w in moved)
+    return [
+        "Order flow, already priced into this plan (chance of an hour, this gameweek only): "
+        f"{described}. Managers' transfers before the deadline predicted absences in ten seasons "
+        "of history; the live move is capped and scaled for the part of the week seen so far."
+    ]
 
 
 def _minutes_risk_notes(

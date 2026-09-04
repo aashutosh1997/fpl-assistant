@@ -357,6 +357,9 @@ def backtest_manager(
     solver_seconds: int = typer.Option(20, help="Per-solve time limit."),
     wildcard_candidates: int = typer.Option(1, help="Gameweeks tried for a wildcard each week."),
     max_gameweek: int = typer.Option(None, help="Stop after this gameweek (for quick checks)."),
+    panel_version: str = typer.Option(
+        None, help="Replay a panel version's parquet files (e.g. panel.1) instead of the warehouse."
+    ),
 ) -> None:
     """Play completed seasons with the planner and score them in points.
 
@@ -369,19 +372,23 @@ def backtest_manager(
     if policy not in manager_module.POLICIES:
         raise typer.BadParameter(f"policy must be one of {manager_module.POLICIES}")
 
-    con = connect(read_only=True)
-    try:
-        if seasons == "all":
+    if seasons != "all":
+        chosen = [s.strip() for s in seasons.split(",")]
+    elif panel_version:
+        chosen = sorted(
+            p.name.split(".")[0] for p in manager_module.PANEL.glob(f"*.{panel_version}.parquet")
+        )
+    else:
+        con = connect(read_only=True)
+        try:
             chosen = [
                 r[0]
                 for r in con.execute(
                     "SELECT DISTINCT season FROM projection_panel ORDER BY season"
                 ).fetchall()
             ]
-        else:
-            chosen = [s.strip() for s in seasons.split(",")]
-    finally:
-        con.close()
+        finally:
+            con.close()
     if not chosen:
         typer.echo("No panel rows stored. Run `fpl backtest panel` first.")
         return
@@ -393,6 +400,7 @@ def backtest_manager(
         wildcard_candidates=wildcard_candidates,
         max_gameweek=max_gameweek,
         workers=workers,
+        panel_version=panel_version,
     )
     typer.echo(table.to_string(index=False))
     typer.echo(

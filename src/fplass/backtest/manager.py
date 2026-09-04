@@ -264,10 +264,22 @@ def panel_expected_points(
     return table.sort_index()
 
 
-def panel_source(season: str) -> Path | None:
-    """The season's parquet file, if the panel worker has written one."""
-    path = PANEL / f"{season}.parquet"
-    return path if path.exists() else None
+def panel_source(season: str, version: str | None = None) -> Path | None:
+    """The season's parquet file for a panel version, if the panel worker has written one.
+
+    Panel files are named ``<season>.<version>.parquet``; a version lets two panels — say one
+    built with the order-flow layer and one without — be replayed side by side while the
+    warehouse table holds only the latest.
+    """
+    candidates = (
+        [PANEL / f"{season}.{version}.parquet"]
+        if version
+        else sorted(PANEL.glob(f"{season}*.parquet"))
+    )
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
 
 
 def actual_gameweek(con, season: str, gameweek: int) -> tuple[dict[int, int], dict[int, int]]:
@@ -543,7 +555,7 @@ def replay_season(
 
 
 def _replay_task(args: tuple) -> dict[str, object]:
-    season, policy, time_limit, candidates, max_gameweek, out_dir = args
+    season, policy, time_limit, candidates, max_gameweek, out_dir, version = args
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s"
     )
@@ -558,14 +570,27 @@ def _replay_task(args: tuple) -> dict[str, object]:
             solver_time_limit=time_limit,
             wildcard_candidates=candidates,
             max_gameweek=max_gameweek,
-            source=None if _warehouse_has(con, season) else panel_source(season),
+            source=_source_for(con, season, version),
         )
     finally:
         con.close()
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    replay.trace().to_csv(out / f"manager_{policy}_{season}.csv", index=False)
-    return replay.summary()
+    tag = f"{policy}.{version}" if version else policy
+    replay.trace().to_csv(out / f"manager_{tag}_{season}.csv", index=False)
+    summary = replay.summary()
+    summary["panel"] = version or "warehouse"
+    return summary
+
+
+def _source_for(con, season: str, version: str | None) -> Path | None:
+    """A named panel version reads its parquet file; otherwise the warehouse, else any file."""
+    if version:
+        path = panel_source(season, version)
+        if path is None:
+            raise FileNotFoundError(f"no panel file for {season} version {version}")
+        return path
+    return None if _warehouse_has(con, season) else panel_source(season)
 
 
 def _warehouse_has(con, season: str) -> bool:
@@ -586,14 +611,15 @@ def replay_seasons(
     max_gameweek: int | None = None,
     workers: int = 1,
     out_dir: Path = BACKTEST,
+    panel_version: str | None = None,
 ) -> pd.DataFrame:
     """Replay several seasons, in parallel processes when asked; one summary row each.
 
-    Traces go to ``out_dir/manager_<policy>_<season>.csv``. The calling process must not hold
-    the warehouse open read-write while this runs.
+    Traces go to ``out_dir/manager_<policy>[.<panel>]_<season>.csv``. The calling process must
+    not hold the warehouse open read-write while this runs.
     """
     tasks = [
-        (s, policy, solver_time_limit, wildcard_candidates, max_gameweek, str(out_dir))
+        (s, policy, solver_time_limit, wildcard_candidates, max_gameweek, str(out_dir), panel_version)
         for s in seasons
     ]
     if workers <= 1 or len(tasks) == 1:
@@ -602,5 +628,6 @@ def replay_seasons(
         with ProcessPoolExecutor(max_workers=workers) as pool:
             rows = list(pool.map(_replay_task, tasks))
     table = pd.DataFrame(rows)
-    table.to_csv(out_dir / f"manager_{policy}_summary.csv", index=False)
+    tag = f"{policy}.{panel_version}" if panel_version else policy
+    table.to_csv(out_dir / f"manager_{tag}_summary.csv", index=False)
     return table

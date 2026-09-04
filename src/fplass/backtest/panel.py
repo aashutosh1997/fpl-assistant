@@ -22,12 +22,14 @@ per-90 rates       aggregated up to the gameweek sequence number, exclusive
 bonus weights      fitted on the previous season, the same prior the live model starts from
 form features      ``player_form(before_gw)``: current-season rows strictly before the gameweek
 player pool        players registered by the gameweek; club and price as of its deadline
+order flow         the flow layer fitted with the season excluded, applied to the deadline week
 =================  ================================================================
 
 Two things history cannot supply, and the panel says so rather than faking them: there are no
 availability flags (``chance_of_playing`` is not recorded), and there is no recalibration layer
 (it reads preseason friendlies and hourly ownership snapshots that exist for 2026/27 only). The
-order-flow layer in :mod:`fplass.features.flow` is the historical stand-in for the first. A
+order-flow layer in :mod:`fplass.features.flow` is the historical stand-in for the first, and
+from ``panel.2`` on it is applied. A
 fixture postponed from an earlier gameweek and played later keeps its original label, so its
 minutes enter the form features one gameweek early; that is a handful of matches a season and is
 left as a known, small optimism.
@@ -49,6 +51,7 @@ import numpy as np
 import pandas as pd
 
 from ..features import bps as bps_module
+from ..features import flow as flow_module
 from ..features import minutes as minutes_module
 from ..features import rates as rates_module
 from ..features import teams as teams_module
@@ -61,7 +64,7 @@ from ..sim.engine import SimulationResult, simulate
 
 log = logging.getLogger(__name__)
 
-PANEL_VERSION = "panel.1"
+PANEL_VERSION = "panel.2"
 DEFAULT_DRAWS = 2_000
 DEFAULT_HORIZON = 8
 PANEL_KEY = ("season", "as_of_gw", "target_gw", "element")
@@ -77,6 +80,7 @@ class SeasonContext:
     rules: ScoringRules
     gameweeks: list[int]  # gameweek labels with fixtures, in order
     sequence: dict[int, int]  # gameweek label -> dense sequence number
+    flow: flow_module.FlowLayer | None = None
 
 
 def panel_seasons(con) -> list[str]:
@@ -128,6 +132,9 @@ def season_context(con, season: str) -> SeasonContext:
     """Fit the season-level pieces once: minutes model, bonus prior, rules, calendar."""
     features = minutes_module.build_features(con)
     minutes_model, _ = minutes_module.fit(features, holdout_seasons=[season])
+    # The order-flow layer stands in for the availability news history never recorded. Fitted
+    # with this season excluded, like everything else.
+    flow_layer = flow_module.fit_layer(con, features, exclude=[season])
 
     previous = con.execute(
         "SELECT max(season) FROM player_gw WHERE season < ?", [season]
@@ -141,6 +148,7 @@ def season_context(con, season: str) -> SeasonContext:
         rules=rules_for_season(con, season),
         gameweeks=season_gameweeks(con, season),
         sequence=gameweek_sequence(con, season),
+        flow=flow_layer,
     )
 
 
@@ -168,6 +176,7 @@ def models_as_of(con, context: SeasonContext, gameweek: int) -> project.Projecti
         bps=context.bps,
         rules=context.rules,
         season=context.season,
+        flow=context.flow,
     )
 
 
@@ -269,7 +278,7 @@ def build_season(
         panel = pd.concat(frames, ignore_index=True)
 
         out_dir.mkdir(parents=True, exist_ok=True)
-        path = out_dir / f"{season}.parquet"
+        path = out_dir / f"{season}.{PANEL_VERSION}.parquet"
         # DuckDB writes the file itself, so no parquet library is needed and a read-only
         # database connection is enough.
         con.register("_panel_rows", panel)
