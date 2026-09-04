@@ -17,3 +17,7 @@ dist/
 build/
 *.egg-info/
 .DS_Store
+
+# Derived replays: the projection panel and paper-manager traces are rebuilt by `fpl backtest`.
+data/panel/
+data/backtest/
