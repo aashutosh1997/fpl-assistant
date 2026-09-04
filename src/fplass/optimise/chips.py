@@ -55,6 +55,11 @@ from .milp import (
 
 log = logging.getLogger(__name__)
 
+# The value floors: a chip is only scheduled inside the horizon when it clears its floor, the
+# rest of the time it is held. These are the planner's guess at each chip's option value; the
+# paper manager is where they get measured.
+DEFAULT_MIN_GAIN = {"bboost": 12.0, "3xc": 6.0, "freehit": 14.0, "wildcard": 12.0}
+
 CHIP_LABELS = {
     "bboost": "Bench Boost",
     "3xc": "Triple Captain",
@@ -267,6 +272,7 @@ def value_wildcard(
     *,
     candidates: int = 3,
     time_limit: int = 60,
+    solve_options: dict | None = None,
 ) -> list[tuple[int, float, float]]:
     """Value a wildcard in each of the next few gameweeks against the chip-free plan.
 
@@ -303,6 +309,7 @@ def value_wildcard(
             chip_windows,
             chip_schedule={gw: "wildcard"},
             time_limit=time_limit,
+            **(solve_options or {}),
         )
         if plan.status not in {"Optimal", "Not Solved"}:
             continue
@@ -325,6 +332,7 @@ def build_roadmap(
     min_gain: dict[str, float] | None = None,
     wildcard_candidates: int = 3,
     solver_time_limit: int = 60,
+    solve_options: dict | None = None,
 ) -> ChipRoadmap:
     """Value every chip in every legal gameweek and pick a schedule.
 
@@ -337,13 +345,16 @@ def build_roadmap(
         wildcard_candidates: How many of the next legal gameweeks to try a wildcard in; each
             costs a solve. Zero skips the wildcard entirely.
         solver_time_limit: Seconds per wildcard solve.
+        solve_options: Extra keyword arguments for the wildcard solves (bench weight, banked
+            transfer value, terminal value), so a chip is valued under the same economy the
+            plan is.
 
     Returns:
         A :class:`ChipRoadmap`.
     """
     # Floors reflect what a genuinely good week for each chip looks like. A Bench Boost in a
     # double gameweek is routinely worth 20+; taking one worth 6 wastes the chip.
-    min_gain = min_gain or {"bboost": 12.0, "3xc": 6.0, "freehit": 14.0, "wildcard": 12.0}
+    min_gain = min_gain or dict(DEFAULT_MIN_GAIN)
 
     horizon = [int(g) for g in gameweeks]
     squad = baseline.squads.get(horizon[0], [])
@@ -382,6 +393,7 @@ def build_roadmap(
             baseline,
             candidates=wildcard_candidates,
             time_limit=solver_time_limit,
+            solve_options=solve_options,
         ):
             for window in chip_windows.legal("wildcard", gw):
                 rows.append(ChipValuation("wildcard", gw, window, mean_gain, upside))

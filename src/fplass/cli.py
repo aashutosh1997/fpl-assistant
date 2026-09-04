@@ -361,8 +361,10 @@ def backtest_manager(
     seasons: str = typer.Option("all", help="Comma-separated seasons, or 'all' with panel rows."),
     policy: str = typer.Option("current", help="current | hold — the planner to replay."),
     workers: int = typer.Option(1, help="Seasons replayed in parallel processes."),
-    solver_seconds: int = typer.Option(20, help="Per-solve time limit."),
-    wildcard_candidates: int = typer.Option(1, help="Gameweeks tried for a wildcard each week."),
+    config: str = typer.Option(
+        None,
+        help="Planner knobs to change, e.g. 'bench_weight=0.3,terminal_beta=0.5,floor:3xc=8'.",
+    ),
     max_gameweek: int = typer.Option(None, help="Stop after this gameweek (for quick checks)."),
     panel_version: str = typer.Option(
         None, help="Replay a panel version's parquet files (e.g. panel.1) instead of the warehouse."
@@ -400,18 +402,89 @@ def backtest_manager(
         typer.echo("No panel rows stored. Run `fpl backtest panel` first.")
         return
 
+    settings = manager_module.PolicyConfig.parse(config)
     table = manager_module.replay_seasons(
         chosen,
         policy=policy,
-        solver_time_limit=solver_seconds,
-        wildcard_candidates=wildcard_candidates,
+        config=settings,
         max_gameweek=max_gameweek,
         workers=workers,
         panel_version=panel_version,
     )
     typer.echo(table.to_string(index=False))
     typer.echo(
-        f"\n{policy}: {table['points'].mean():.0f} points a season over {len(table)} season(s)"
+        f"\n{policy} [{settings.tag()}]: {table['points'].mean():.0f} points a season "
+        f"over {len(table)} season(s)"
+    )
+
+
+@backtest_app.command("options")
+def backtest_options(
+    policy: str = typer.Option("current", help="Whose traces to measure on."),
+    config: str = typer.Option(None, help="The traces' planner config, as given to `manager`."),
+    panel_version: str = typer.Option(None, help="The panel version the traces were played on."),
+) -> None:
+    """Measure the transfer, bank and bench option values over the paper manager's weeks."""
+    from .backtest import manager as manager_module
+    from .backtest import panel as panel_module
+    from .ingest.warehouse import connect
+    from .options import value as value_module
+
+    settings = manager_module.PolicyConfig.parse(config)
+    tag = manager_module.run_tag(policy, settings, panel_version)
+    traces = sorted(manager_module.BACKTEST.glob(f"manager_{tag}_20*.csv"))
+    if not traces:
+        typer.echo(f"No traces for {tag}. Run `fpl backtest manager` first.")
+        return
+    sources = panel_module.panel_files(panel_version) if panel_version else None
+    con = connect(read_only=True)
+    try:
+        weeks = value_module.measure_from_traces(con, traces, panel_sources=sources)
+    finally:
+        con.close()
+    bench, per_season = value_module.bench_weight_from_traces(traces)
+    typer.echo("BENCH  substitutes' points as a share of what the plan expected of the bench")
+    typer.echo(per_season.to_string(index=False))
+    typer.echo(f"  bench_weight = {bench:.3f}\n")
+    typer.echo("TRANSFERS AND MONEY  swap gains available at the next deadline, per week")
+    typer.echo(
+        weeks.groupby("season")[
+            ["gain_1", "gain_2", "transfer_value", "bank_tenth", "bank_half", "bank_million"]
+        ].mean().round(3).to_string()
+    )
+    typer.echo(
+        f"  banked_transfer_value = {weeks['transfer_value'].mean():.3f} pts a week "
+        f"(second-best swap {weeks['gain_2'].mean():.2f} pts; {len(weeks)} weeks)"
+    )
+    typer.echo(
+        f"  bank: 0.1m = {weeks['bank_tenth'].mean():.3f}, 0.5m = {weeks['bank_half'].mean():.3f}, "
+        f"1.0m = {weeks['bank_million'].mean():.3f} pts"
+    )
+
+
+@backtest_app.command("revisions")
+def backtest_revisions(
+    panel_version: str = typer.Option(None, help="Read a panel version's files, else the warehouse."),
+) -> None:
+    """How far projections move between deadlines, by position and certainty."""
+    from .backtest import panel as panel_module
+    from .ingest.warehouse import connect
+    from .options import revisions as revisions_module
+
+    sources = panel_module.panel_files(panel_version) if panel_version else None
+    con = connect(read_only=True)
+    try:
+        table = revisions_module.revisions(con, sources=sources)
+    finally:
+        con.close()
+    if table.empty:
+        typer.echo("No panel rows to measure revisions on.")
+        return
+    typer.echo(revisions_module.summarise(table).to_string(index=False))
+    jumps = table[table["p_full_before"] >= revisions_module.JUMP_FROM]
+    typer.echo(
+        f"\n{len(table):,} player-weeks; a likely starter collapses to a likely absentee by the "
+        f"next deadline in {jumps['jump'].mean():.2%} of weeks"
     )
 
 

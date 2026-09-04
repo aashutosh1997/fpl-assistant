@@ -28,6 +28,8 @@ import pandas as pd
 from .api import FPLAPIError, FPLClient
 from .features import flow as flow_module
 from .ingest.sources import CURRENT_SEASON
+from .options import revisions as revisions_module
+from .options import value as value_module
 from .optimise import chips as chips_module
 from .optimise import league as league_module
 from .optimise import milp
@@ -67,6 +69,9 @@ class Recommendation:
     squad_before: list[int]
     deadline: dt.datetime | None
     notes: list[str] = field(default_factory=list)
+    # What flexibility is worth to this squad this week, from sampled next weeks; None until
+    # the projection panel exists to sample from.
+    option_values: value_module.OptionValues | None = None
 
     def transfer_summary(self) -> str:
         names = dict(zip(self.players["element"], self.players["web_name"], strict=True))
@@ -306,6 +311,9 @@ def advise(
 
     notes.extend(_minutes_risk_notes(chosen, player_matches, players, target_gameweek))
     notes.extend(_flow_notes(chosen, player_matches, players, target_gameweek))
+    option_values = _option_values(
+        con, expected_points, player_matches, players, squad, target_gameweek
+    )
 
     return Recommendation(
         gameweek=target_gameweek,
@@ -321,7 +329,44 @@ def advise(
         squad_before=sorted(squad.elements),
         deadline=deadline,
         notes=notes,
+        option_values=option_values,
     )
+
+
+def _option_values(
+    con,
+    expected_points: pd.DataFrame,
+    player_matches: pd.DataFrame,
+    players: pd.DataFrame,
+    squad: milp.SquadState,
+    gameweek: int,
+) -> value_module.OptionValues | None:
+    """Price this squad's flexibilities under next weeks sampled from the panel's revisions."""
+    if not squad.players:
+        return None
+    try:
+        stored = con.execute("SELECT count(*) FROM projection_panel").fetchone()[0]
+    except Exception:  # pragma: no cover - table absent on an old warehouse
+        return None
+    if not stored:
+        return None
+    remaining = [g for g in expected_points.columns if g > gameweek]
+    if not remaining:
+        return None
+    try:
+        table = revisions_module.revisions(con)
+        sampler = revisions_module.RevisionSampler.fit(table)
+        p_full = (
+            player_matches[player_matches["event"] == gameweek]
+            .groupby("element")["p_full_base"]
+            .max()
+        )
+        return value_module.live_option_values(
+            expected_points[remaining], p_full, players, squad, sampler
+        )
+    except Exception as exc:  # pragma: no cover - never lose a plan over a diagnostic
+        log.warning("could not value the squad's options: %s", exc)
+        return None
 
 
 def _live_flow(
@@ -576,6 +621,18 @@ def format_report(recommendation: Recommendation) -> str:
         "LINEUPS",
         recommendation.plan.lineups_summary(names, positions, recommendation.expected_points),
     ]
+
+    if recommendation.option_values is not None:
+        values = recommendation.option_values
+        gw = recommendation.gameweek
+        moves = len(recommendation.plan.transfers_in.get(gw, []))
+        lines += [
+            "",
+            "OPTIONS (what flexibility is worth to this squad)",
+            "  " + values.summary(),
+            f"  best single swap under this week's projection: {values.best_swap_now:.2f} pts; "
+            f"the plan makes {moves} transfer(s) this week",
+        ]
 
     if recommendation.league_metrics:
         lines += ["", "LEAGUE"]

@@ -52,6 +52,82 @@ POLICY_CURRENT = "current"
 POLICY_HOLD = "hold"
 POLICIES = (POLICY_CURRENT, POLICY_HOLD)
 
+# Weeks beyond the planning horizon whose projection feeds the terminal value.
+TERMINAL_WEEKS = 4
+
+
+@dataclass(slots=True)
+class PolicyConfig:
+    """The knobs of the planner, so a replay can measure what each is worth.
+
+    The defaults are the live planner's current constants. A replay with one of them changed,
+    paired season by season against the baseline, is how a constant earns its replacement.
+    """
+
+    horizon: int = 8
+    bench_weight: float = 0.12
+    banked_transfer_value: float = 0.25
+    terminal_beta: float = 0.0  # share of the projection beyond the horizon credited at its end
+    terminal_bank_value: float = 0.0  # points per 0.1m left in the bank at the horizon's end
+    chip_floors: dict[str, float] | None = None  # None: the roadmap's defaults
+    wildcard_candidates: int = 1
+    solver_time_limit: int = 20
+
+    @classmethod
+    def parse(cls, spec: str | None) -> PolicyConfig:
+        """``"bench_weight=0.3,terminal_beta=0.5"`` -> a config; chip floors as ``3xc:8``."""
+        config = cls()
+        if not spec:
+            return config
+        floors: dict[str, float] = {}
+        for part in spec.split(","):
+            if not part.strip():
+                continue
+            key, raw = part.split("=", 1)
+            key, raw = key.strip(), raw.strip()
+            if ":" in key:
+                chip = key.split(":", 1)[1]
+                floors[chip] = float(raw)
+                continue
+            current = getattr(config, key)
+            setattr(config, key, type(current)(raw) if current is not None else float(raw))
+        if floors:
+            base = dict(chips_module.DEFAULT_MIN_GAIN)
+            base.update(floors)
+            config.chip_floors = base
+        return config
+
+    def solve_options(self) -> dict:
+        return {
+            "bench_weight": self.bench_weight,
+            "banked_transfer_value": self.banked_transfer_value,
+            "terminal_bank_value": self.terminal_bank_value,
+        }
+
+    def tag(self) -> str:
+        """A short label for output files: only the knobs that differ from the defaults."""
+        default = PolicyConfig()
+        parts = []
+        for name in ("horizon", "bench_weight", "banked_transfer_value", "terminal_beta",
+                     "terminal_bank_value"):
+            if getattr(self, name) != getattr(default, name):
+                parts.append(f"{name}={getattr(self, name)}")
+        if self.chip_floors:
+            parts.append("floors=" + "-".join(f"{k}{v:g}" for k, v in sorted(self.chip_floors.items())))
+        return ",".join(parts) or "default"
+
+
+def split_horizon(
+    expected: pd.DataFrame, config: PolicyConfig
+) -> tuple[pd.DataFrame, pd.Series | None]:
+    """The planning horizon, and the terminal value read from the weeks beyond it."""
+    columns = list(expected.columns)
+    inside = expected[columns[: config.horizon]]
+    beyond = columns[config.horizon : config.horizon + TERMINAL_WEEKS]
+    if config.terminal_beta and beyond:
+        return inside, config.terminal_beta * expected[beyond].sum(axis=1)
+    return inside, None
+
 FORMATION_MIN = {"GKP": 1, "DEF": 3, "MID": 2, "FWD": 1}
 
 
@@ -321,9 +397,7 @@ def plan_current(
     players: pd.DataFrame,
     state: milp.SquadState,
     windows: milp.ChipWindows,
-    *,
-    time_limit: int,
-    wildcard_candidates: int,
+    config: PolicyConfig,
 ) -> milp.Plan:
     """The live advisor's policy, minus the rival stage: roadmap the chips, then solve.
 
@@ -332,35 +406,41 @@ def plan_current(
     (a sum of means is the mean of the sum) and only the reported upside collapses to the mean,
     which the roadmap does not schedule on.
     """
+    inside, terminal = split_horizon(expected, config)
+    options = {**config.solve_options(), "terminal_value": terminal}
+    time_limit = config.solver_time_limit
     baseline = milp.solve(
-        expected, players, state, windows, allow_chips=False, time_limit=time_limit
+        inside, players, state, windows, allow_chips=False, time_limit=time_limit, **options
     )
     if not chips_remaining(state, windows):
         return baseline
 
-    samples = expected.to_numpy(dtype="float64")[None, :, :]
+    samples = inside.to_numpy(dtype="float64")[None, :, :]
     roadmap = chips_module.build_roadmap(
         con,
         samples,
-        expected.index.to_numpy(),
-        np.array(list(expected.columns)),
+        inside.index.to_numpy(),
+        np.array(list(inside.columns)),
         players,
         state,
         baseline,
         windows,
         season,
-        wildcard_candidates=wildcard_candidates,
+        min_gain=config.chip_floors,
+        wildcard_candidates=config.wildcard_candidates,
         solver_time_limit=time_limit,
+        solve_options=options,
     )
     if not roadmap.schedule:
         return baseline
     plan = milp.solve(
-        expected,
+        inside,
         players,
         state,
         windows,
         chip_schedule=roadmap.schedule,
         time_limit=time_limit,
+        **options,
     )
     if plan.status not in {"Optimal", "Not Solved"}:
         log.warning("%s GW%d: chip plan %s, falling back to the chip-free plan", season, gameweek, plan.status)
@@ -376,25 +456,25 @@ def plan_hold(
     players: pd.DataFrame,
     state: milp.SquadState,
     windows: milp.ChipWindows,
-    *,
-    time_limit: int,
-    wildcard_candidates: int,
+    config: PolicyConfig,
 ) -> milp.Plan:
     """Build the opening squad, then never touch it: the value of doing nothing.
 
     After gameweek one the solver only ever sees the fifteen players owned, so no transfer is
     possible and it just picks the eleven and the captain each week.
     """
+    inside, _ = split_horizon(expected, config)
+    time_limit = config.solver_time_limit
     if not state.players:
         return milp.solve(
-            expected, players, state, windows, allow_chips=False, time_limit=time_limit
+            inside, players, state, windows, allow_chips=False, time_limit=time_limit
         )
     owned = players[players["element"].isin(state.elements)]
     frozen = milp.SquadState(
         players=dict(state.players), bank=state.bank, free_transfers=0, chips_used=set(state.chips_used)
     )
     return milp.solve(
-        expected,
+        inside,
         owned,
         frozen,
         windows,
@@ -514,13 +594,13 @@ def replay_season(
     season: str,
     *,
     policy: str = POLICY_CURRENT,
-    solver_time_limit: int = 20,
-    wildcard_candidates: int = 1,
+    config: PolicyConfig | None = None,
     max_gameweek: int | None = None,
     source: Path | None = None,
 ) -> SeasonReplay:
     """Play one season with a policy, from the opening squad to the final whistle."""
     planner = PLANNERS[policy]
+    config = config or PolicyConfig()
     windows = milp.ChipWindows.from_warehouse(con, CURRENT_SEASON)
     calendar = panel_module.season_gameweeks(con, season)
     state = milp.SquadState(players={}, bank=STARTING_BANK, free_transfers=milp.SQUAD_SIZE)
@@ -533,17 +613,7 @@ def replay_season(
         tick = time.time()
         expected = panel_expected_points(con, season, gameweek, source=source)
         players = project.current_players(con, season, as_of_gameweek=gameweek)
-        plan = planner(
-            con,
-            season,
-            gameweek,
-            expected,
-            players,
-            state,
-            windows,
-            time_limit=solver_time_limit,
-            wildcard_candidates=wildcard_candidates,
-        )
+        plan = planner(con, season, gameweek, expected, players, state, windows, config)
         record, state = execute_gameweek(
             con, season, gameweek, plan, expected, players, state, windows
         )
@@ -566,7 +636,7 @@ def replay_season(
 
 
 def _replay_task(args: tuple) -> dict[str, object]:
-    season, policy, time_limit, candidates, max_gameweek, out_dir, version = args
+    season, policy, config, max_gameweek, out_dir, version = args
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s"
     )
@@ -578,8 +648,7 @@ def _replay_task(args: tuple) -> dict[str, object]:
             con,
             season,
             policy=policy,
-            solver_time_limit=time_limit,
-            wildcard_candidates=candidates,
+            config=config,
             max_gameweek=max_gameweek,
             source=_source_for(con, season, version),
         )
@@ -587,11 +656,19 @@ def _replay_task(args: tuple) -> dict[str, object]:
         con.close()
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    tag = f"{policy}.{version}" if version else policy
+    tag = run_tag(policy, config, version)
     replay.trace().to_csv(out / f"manager_{tag}_{season}.csv", index=False)
     summary = replay.summary()
     summary["panel"] = version or "warehouse"
+    summary["config"] = config.tag()
     return summary
+
+
+def run_tag(policy: str, config: PolicyConfig, version: str | None) -> str:
+    parts = [policy, config.tag()]
+    if version:
+        parts.append(version)
+    return ".".join(parts)
 
 
 def _source_for(con, season: str, version: str | None) -> Path | None:
@@ -617,8 +694,7 @@ def replay_seasons(
     seasons: list[str],
     *,
     policy: str = POLICY_CURRENT,
-    solver_time_limit: int = 20,
-    wildcard_candidates: int = 1,
+    config: PolicyConfig | None = None,
     max_gameweek: int | None = None,
     workers: int = 1,
     out_dir: Path = BACKTEST,
@@ -626,19 +702,17 @@ def replay_seasons(
 ) -> pd.DataFrame:
     """Replay several seasons, in parallel processes when asked; one summary row each.
 
-    Traces go to ``out_dir/manager_<policy>[.<panel>]_<season>.csv``. The calling process must
-    not hold the warehouse open read-write while this runs.
+    Traces go to ``out_dir/manager_<policy>.<config>[.<panel>]_<season>.csv``. The calling
+    process must not hold the warehouse open read-write while this runs.
     """
-    tasks = [
-        (s, policy, solver_time_limit, wildcard_candidates, max_gameweek, str(out_dir), panel_version)
-        for s in seasons
-    ]
+    config = config or PolicyConfig()
+    tasks = [(s, policy, config, max_gameweek, str(out_dir), panel_version) for s in seasons]
     if workers <= 1 or len(tasks) == 1:
         rows = [_replay_task(t) for t in tasks]
     else:
         with ProcessPoolExecutor(max_workers=workers) as pool:
             rows = list(pool.map(_replay_task, tasks))
     table = pd.DataFrame(rows)
-    tag = f"{policy}.{panel_version}" if panel_version else policy
-    table.to_csv(out_dir / f"manager_{tag}_summary.csv", index=False)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    table.to_csv(out_dir / f"manager_{run_tag(policy, config, panel_version)}_summary.csv", index=False)
     return table

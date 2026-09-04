@@ -187,3 +187,20 @@ def test_two_gameweeks_of_a_real_season_replay(con):
     assert replay.records[1].transfers_in == []
     assert first.bank >= 0 and first.squad_value <= manager.STARTING_BANK + 50
     assert replay.total == sum(r.points for r in replay.records)
+
+
+def test_policy_config_parses_and_splits_the_horizon():
+    import pandas as pd
+
+    config = manager.PolicyConfig.parse("bench_weight=0.3,terminal_beta=0.5,floor:3xc=8,horizon=2")
+    assert config.bench_weight == 0.3 and config.terminal_beta == 0.5 and config.horizon == 2
+    assert config.chip_floors["3xc"] == 8.0 and config.chip_floors["bboost"] == 12.0
+    assert "terminal_beta=0.5" in config.tag() and "3xc8" in config.tag()
+    assert manager.PolicyConfig.parse(None).tag() == "default"
+
+    expected = pd.DataFrame({gw: [float(gw)] * 2 for gw in range(5, 12)}, index=[1, 2])
+    inside, terminal = manager.split_horizon(expected, config)
+    assert list(inside.columns) == [5, 6]
+    assert terminal.loc[1] == 0.5 * (7 + 8 + 9 + 10), "four weeks beyond the horizon, halved"
+    inside, terminal = manager.split_horizon(expected, manager.PolicyConfig())
+    assert list(inside.columns) == [5, 6, 7, 8, 9, 10, 11] and terminal is None
