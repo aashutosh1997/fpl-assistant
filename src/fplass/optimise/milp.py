@@ -489,6 +489,12 @@ def solve(
         # bound; a wildcard leaves the count untouched because its transfers are free.
         problem += free_transfers[gw] <= available - used[gw] + 1
 
+        # A free hit changes the team for one week only: the permanent squad cannot move at all
+        # that week. Without this the solver treated the chip as a free wildcard on the side —
+        # every transfer that week was outside the economy, so it churned the real squad for
+        # nothing while the free-hit squad played.
+        problem += made <= SQUAD_SIZE * (1 - free_hit)
+
         # One chip per gameweek.
         if allow_chips:
             active = [v for (_, _, g), v in chip_play.items() if g == gw]

@@ -36,6 +36,7 @@ addopts = "-q"
 # PuLP 3.x warns about its own 4.0 API migration on every variable it creates, which buries
 # real output under thousands of lines.
 filterwarnings = ["ignore:.*deprecated.*:DeprecationWarning:pulp.*"]
+markers = ["slow: replays real seasons and takes minutes"]
 
 [tool.ruff]
 line-length = 100

@@ -349,5 +349,56 @@ def backtest_score(
     typer.echo(table.to_string(index=False))
 
 
+@backtest_app.command("manager")
+def backtest_manager(
+    seasons: str = typer.Option("all", help="Comma-separated seasons, or 'all' with panel rows."),
+    policy: str = typer.Option("current", help="current | hold — the planner to replay."),
+    workers: int = typer.Option(1, help="Seasons replayed in parallel processes."),
+    solver_seconds: int = typer.Option(20, help="Per-solve time limit."),
+    wildcard_candidates: int = typer.Option(1, help="Gameweeks tried for a wildcard each week."),
+    max_gameweek: int = typer.Option(None, help="Stop after this gameweek (for quick checks)."),
+) -> None:
+    """Play completed seasons with the planner and score them in points.
+
+    The number every policy change is judged by. Needs the projection panel; roughly half a
+    minute a gameweek with the default solver limit.
+    """
+    from .backtest import manager as manager_module
+    from .ingest.warehouse import connect
+
+    if policy not in manager_module.POLICIES:
+        raise typer.BadParameter(f"policy must be one of {manager_module.POLICIES}")
+
+    con = connect(read_only=True)
+    try:
+        if seasons == "all":
+            chosen = [
+                r[0]
+                for r in con.execute(
+                    "SELECT DISTINCT season FROM projection_panel ORDER BY season"
+                ).fetchall()
+            ]
+        else:
+            chosen = [s.strip() for s in seasons.split(",")]
+    finally:
+        con.close()
+    if not chosen:
+        typer.echo("No panel rows stored. Run `fpl backtest panel` first.")
+        return
+
+    table = manager_module.replay_seasons(
+        chosen,
+        policy=policy,
+        solver_time_limit=solver_seconds,
+        wildcard_candidates=wildcard_candidates,
+        max_gameweek=max_gameweek,
+        workers=workers,
+    )
+    typer.echo(table.to_string(index=False))
+    typer.echo(
+        f"\n{policy}: {table['points'].mean():.0f} points a season over {len(table)} season(s)"
+    )
+
+
 if __name__ == "__main__":
     app()
