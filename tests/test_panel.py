@@ -115,6 +115,38 @@ def test_rates_and_results_stop_at_the_deadline(con, season_available):
     assert not ((results["season"] == SEASON) & (results["event"] >= 20)).any()
 
 
+def test_replayed_form_matches_the_training_path(con, season_available):
+    """The serving-path features at a past deadline must be the training-path features.
+
+    Pinned against the leak that made every replayed season but the last worthless: rows from
+    later seasons out-ranked the replayed season for recency, so current-season form vanished
+    and "last season" became the player's latest season in the warehouse.
+    """
+    from fplass.features import minutes
+    from fplass.sim.project import player_form
+
+    # A season with an undisturbed calendar: the training path orders a player's matches by
+    # gameweek and the serving path by kickoff, which only differ when fixtures are rescheduled
+    # (2022-23, with a World Cup in the middle, agrees on 94% of rows rather than all of them).
+    season, gameweek = "2023-24", 20
+    training = minutes.build_features(con, seasons=[season])
+    week = training[training["gw"] == gameweek].drop_duplicates("element")
+    form = player_form(con, season, before_gw=gameweek)
+    joined = week.merge(form, on="element", suffixes=("_train", "_serve"))
+    assert len(joined) > 500
+    for feature in ("minutes_last", "minutes_prev", "started_last"):
+        same = (joined[f"{feature}_train"] == joined[f"{feature}_serve"]).mean()
+        assert same > 0.99, f"{feature}: {same:.3f} of rows agree"
+    for feature in ("roll_minutes_5", "roll_start_rate_5"):
+        corr = joined[f"{feature}_train"].corr(joined[f"{feature}_serve"])
+        assert corr > 0.99, f"{feature}: corr {corr:.3f}"
+    # And the prior season used for players yet to feature is the one before, never a later one.
+    later = con.execute(
+        "SELECT count(*) FROM player_gw WHERE season > ?", [season]
+    ).fetchone()[0]
+    assert later > 0, "this test needs seasons after the replayed one"
+
+
 def test_a_replayed_deadline_projects_the_week_that_followed(con, season_available):
     """GW20 of 2024-25, replayed blind: sensible probabilities, and rank skill on the outcome."""
     context = panel.season_context(con, SEASON)
@@ -136,7 +168,15 @@ def test_a_replayed_deadline_projects_the_week_that_followed(con, season_availab
         [SEASON],
     ).fetchdf()
     joined = week.merge(actual, on="element")
-    assert joined["ep_mean"].corr(joined["total_points"], method="spearman") > 0.35
+    assert joined["ep_mean"].corr(joined["total_points"], method="spearman") > 0.45
+    minutes_actual = con.execute(
+        "SELECT element, sum(minutes) AS minutes FROM player_gw WHERE season = ? AND gw = 20 "
+        "GROUP BY element",
+        [SEASON],
+    ).fetchdf()
+    scored = week.merge(minutes_actual, on="element")
+    brier = ((scored["p_full"] - (scored["minutes"] >= 60)) ** 2).mean()
+    assert brier < 0.13, f"minutes Brier {brier:.4f} at a mid-season deadline"
 
 
 def test_scoring_the_panel_needs_rows(con):

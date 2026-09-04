@@ -263,6 +263,14 @@ def player_form(
     for a played gameweek can be rebuilt without seeing that gameweek's minutes. Without it a
     "re-projection" of gameweek 2 after ingesting gameweek 2 is scored against its own inputs.
 
+    Seasons *after* ``season`` are excluded too. Live there are none, so it costs nothing; in a
+    replay of a completed season it is the difference between form and fiction. Left in, the
+    later seasons' rows out-rank the replayed season's for recency, so the current-season
+    windows come back empty, and "the player's most recent completed season" resolves to his
+    latest season in the warehouse — three years in the future for 2022-23. That produced
+    serving features correlated only 0.4 with the training-path features for the same
+    player-weeks, and a minutes model with no skill on every replayed season but the last.
+
     Form has to be carried across the summer on the stable player ``code``, or every projection
     made in August would treat the whole league as debutants. But carrying it *literally* — taking
     the last five matches played — is actively harmful, because the end of a season is the least
@@ -306,6 +314,7 @@ def player_form(
             JOIN player_gw_as_of p
                 ON p.season = pl_hist.season AND p.element = pl_hist.element
             WHERE pl_now.season = ?
+              AND p.season <= ?
               AND (p.season <> ? OR p.gw < ?)
         ),
         current AS (
@@ -369,7 +378,7 @@ def player_form(
         FROM current c
         FULL OUTER JOIN prior p ON p.element = c.element
         """,
-        [season, season, before_gw if before_gw is not None else 10**6, season, season],
+        [season, season, season, before_gw if before_gw is not None else 10**6, season, season],
     ).fetchdf()
 
     return _blend_form(frame, lookback=lookback)
