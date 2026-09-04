@@ -50,3 +50,51 @@ def test_best_eleven_is_legal():
     counts = pd.Series([positions[e] for e in eleven]).value_counts()
     assert counts["GKP"] == 1 and counts["DEF"] >= 3 and counts["MID"] >= 2 and counts["FWD"] >= 1
     assert 2 in eleven and 1 not in eleven, "the better keeper starts"
+
+
+def test_thresholds_fall_as_the_window_closes_and_leave_out_the_season():
+    from fplass.optimise import chips as roadmap
+
+    windows = milp.ChipWindows(windows={"bboost": [(1, 10)], "3xc": [(1, 10)], "freehit": [(1, 10)],
+                                        "wildcard": [(1, 10)]})
+    thresholds = chips.ContinuationThresholds.from_gains(_gains(), windows, exclude_season="A")
+    assert thresholds.floor_for("bboost", 1) == 25.0, "both other seasons' peaks lie ahead"
+    assert thresholds.floor_for("bboost", 9) == 10.0
+    assert thresholds.floor_for("bboost", 10) == 0.0, "last week: play for any gain"
+    assert thresholds.floor_for("wildcard", 5) == roadmap.DEFAULT_MIN_GAIN["wildcard"]
+    assert thresholds.floor_for("bboost", 11) == roadmap.DEFAULT_MIN_GAIN["bboost"], "outside the window"
+
+
+def test_roadmap_accepts_a_threshold_function(con):
+    import numpy as np
+    import pandas as pd
+
+    from fplass.optimise import chips as roadmap
+    from fplass.optimise.milp import ChipWindows, SquadState, solve
+
+    rows = []
+    element = 1
+    rng = np.random.default_rng(2)
+    for club in range(1, 9):
+        for position, count in (("GKP", 2), ("DEF", 3), ("MID", 3), ("FWD", 2)):
+            for _ in range(count):
+                rows.append({"element": element, "position": position, "team_id": club,
+                             "price": int(rng.integers(40, 90)), "web_name": f"p{element}"})
+                element += 1
+    universe = pd.DataFrame(rows)
+    gameweeks = [1, 2, 3]
+    base = universe.set_index("element")["price"] / 20.0
+    points = pd.DataFrame({gw: base for gw in gameweeks}, index=base.index)
+    windows = ChipWindows(windows={"wildcard": [(2, 19)], "freehit": [(2, 19)],
+                                   "bboost": [(1, 19)], "3xc": [(1, 19)]})
+    state = SquadState(players={}, bank=1000, free_transfers=15)
+    plan = solve(points, universe, state, windows, gameweeks=gameweeks, allow_chips=False, time_limit=20)
+    samples = points.to_numpy()[None, :, :]
+    never = roadmap.build_roadmap(con, samples, points.index.to_numpy(), np.array(gameweeks), universe,
+                                  state, plan, windows, "2026-27", min_gain=lambda chip, gw: 1e9,
+                                  wildcard_candidates=0)
+    assert never.schedule == {}
+    always = roadmap.build_roadmap(con, samples, points.index.to_numpy(), np.array(gameweeks), universe,
+                                   state, plan, windows, "2026-27", min_gain=lambda chip, gw: 0.0,
+                                   wildcard_candidates=0)
+    assert "3xc" in always.schedule.values()

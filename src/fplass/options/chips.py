@@ -23,6 +23,7 @@ how much of the hindsight-best each rule captured so the trade-off is visible.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -188,6 +189,52 @@ def evaluate_rules(
             }
         )
     return pd.DataFrame(rows)
+
+
+@dataclass(slots=True)
+class ContinuationThresholds:
+    """Measured chip floors that depend on how much of the window is left.
+
+    For each chip and window, the expected best later gain by weeks left; a chip is played when
+    this week's gain beats it. Chips without a table (the wildcard, whose value is a solve rather
+    than a gain) keep their flat floor.
+    """
+
+    tables: dict[tuple[str, int, int], dict[int, float]] = field(default_factory=dict)
+    floors: dict[str, float] = field(default_factory=lambda: dict(roadmap_module.DEFAULT_MIN_GAIN))
+
+    @classmethod
+    def from_gains(
+        cls,
+        gains: pd.DataFrame,
+        windows: milp.ChipWindows,
+        *,
+        exclude_season: str | None = None,
+        floors: dict[str, float] | None = None,
+    ) -> ContinuationThresholds:
+        """Fit on the measured gains, leaving out ``exclude_season`` so a replay never sees its own."""
+        usable = gains if exclude_season is None else gains[gains["season"] != exclude_season]
+        out = cls(floors=dict(floors or roadmap_module.DEFAULT_MIN_GAIN))
+        for chip in CHIPS:
+            for start, stop in windows.windows.get(chip, []):
+                table = continuation_values(usable, chip, (start, stop))
+                if table.empty:
+                    continue
+                out.tables[(chip, start, stop)] = dict(
+                    zip(table["weeks_left"].astype(int), table["mean"].astype(float), strict=True)
+                )
+        return out
+
+    def floor_for(self, chip: str, gameweek: int) -> float:
+        for (name, start, stop), table in self.tables.items():
+            if name == chip and start <= gameweek <= stop:
+                weeks_left = stop - gameweek
+                if weeks_left <= 0:
+                    return 0.0
+                if weeks_left in table:
+                    return table[weeks_left]
+                return table[max(table)] if weeks_left > max(table) else table[min(table)]
+        return self.floors.get(chip, 0.0)
 
 
 def report(gains: pd.DataFrame, windows: milp.ChipWindows) -> str:

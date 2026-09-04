@@ -70,6 +70,10 @@ class PolicyConfig:
     terminal_beta: float = 0.0  # share of the projection beyond the horizon credited at its end
     terminal_bank_value: float = 0.0  # points per 0.1m left in the bank at the horizon's end
     chip_floors: dict[str, float] | None = None  # None: the roadmap's defaults
+    # "floors": flat floors. "continuation": the measured expected-best-later thresholds from a
+    # chip-gains file (see `fpl backtest chips`), fitted with the replayed season left out.
+    chip_rule: str = "floors"
+    chip_gains: str | None = None
     wildcard_candidates: int = 1
     solver_time_limit: int = 20
 
@@ -90,7 +94,10 @@ class PolicyConfig:
                 floors[chip] = float(raw)
                 continue
             current = getattr(config, key)
-            setattr(config, key, type(current)(raw) if current is not None else float(raw))
+            if current is None:
+                setattr(config, key, raw if key in ("chip_gains",) else float(raw))
+            else:
+                setattr(config, key, type(current)(raw))
         if floors:
             base = dict(chips_module.DEFAULT_MIN_GAIN)
             base.update(floors)
@@ -114,7 +121,22 @@ class PolicyConfig:
                 parts.append(f"{name}={getattr(self, name)}")
         if self.chip_floors:
             parts.append("floors=" + "-".join(f"{k}{v:g}" for k, v in sorted(self.chip_floors.items())))
+        if self.chip_rule != "floors":
+            parts.append(f"chips={self.chip_rule}")
         return ",".join(parts) or "default"
+
+    def thresholds(self, windows: milp.ChipWindows, season: str):
+        """The chip floor to hand the roadmap for one replayed season."""
+        if self.chip_rule != "continuation":
+            return self.chip_floors
+        from ..options import chips as chip_options
+
+        if not self.chip_gains:
+            raise ValueError("chip_rule=continuation needs chip_gains=<path to a chip-gains file>")
+        gains = pd.read_csv(self.chip_gains)
+        return chip_options.ContinuationThresholds.from_gains(
+            gains, windows, exclude_season=season, floors=self.chip_floors
+        ).floor_for
 
 
 def split_horizon(
@@ -426,7 +448,7 @@ def plan_current(
         baseline,
         windows,
         season,
-        min_gain=config.chip_floors,
+        min_gain=config.thresholds(windows, season),
         wildcard_candidates=config.wildcard_candidates,
         solver_time_limit=time_limit,
         solve_options=options,

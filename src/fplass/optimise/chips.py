@@ -36,6 +36,7 @@ fixture list on every run, so the roadmap updates itself as those materialise.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 
 import numpy as np
@@ -329,7 +330,7 @@ def build_roadmap(
     chip_windows: ChipWindows,
     season: str,
     *,
-    min_gain: dict[str, float] | None = None,
+    min_gain: dict[str, float] | Callable[[str, int], float] | None = None,
     wildcard_candidates: int = 3,
     solver_time_limit: int = 60,
     solve_options: dict | None = None,
@@ -341,7 +342,9 @@ def build_roadmap(
         baseline: A chip-free plan, supplying the squad and lineups each chip is measured against.
         min_gain: Minimum points gain before a chip is worth playing at all. This is the chip's
             option value: playing a Bench Boost for two points now forfeits the chance of a much
-            better one later, so a floor prevents the solver frittering chips away.
+            better one later, so a floor prevents the solver frittering chips away. Either a
+            flat floor per chip, or a callable ``(chip, gameweek) -> floor`` such as the measured
+            continuation values in :mod:`fplass.options.chips`, which fall as the window closes.
         wildcard_candidates: How many of the next legal gameweeks to try a wildcard in; each
             costs a solve. Zero skips the wildcard entirely.
         solver_time_limit: Seconds per wildcard solve.
@@ -354,7 +357,15 @@ def build_roadmap(
     """
     # Floors reflect what a genuinely good week for each chip looks like. A Bench Boost in a
     # double gameweek is routinely worth 20+; taking one worth 6 wastes the chip.
-    min_gain = min_gain or dict(DEFAULT_MIN_GAIN)
+    if min_gain is None:
+        min_gain = dict(DEFAULT_MIN_GAIN)
+    if callable(min_gain):
+        floor_for = min_gain
+    else:
+        floors = min_gain
+
+        def floor_for(chip: str, gameweek: int) -> float:
+            return floors.get(chip, 0.0)
 
     horizon = [int(g) for g in gameweeks]
     squad = baseline.squads.get(horizon[0], [])
@@ -426,7 +437,7 @@ def build_roadmap(
     used_instances: set[tuple[str, int]] = set()
     for _, row in valuations.sort_values("mean_gain", ascending=False).iterrows():
         chip, gw, window = row["chip"], int(row["gameweek"]), int(row["window"])
-        if row["mean_gain"] < min_gain.get(chip, 0.0):
+        if row["mean_gain"] < floor_for(chip, gw):
             continue
         if gw in schedule or (chip, window) in used_instances:
             continue
