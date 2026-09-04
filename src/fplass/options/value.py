@@ -206,6 +206,13 @@ def live_option_values(
 # ------------------------------------------------------------------ historical measurement
 
 
+def _elements(cell: object) -> list[int]:
+    """A space-separated list of element ids from a trace cell; empty cells read back as NaN."""
+    if not isinstance(cell, str):
+        return []
+    return [int(e) for e in cell.split() if e]
+
+
 def squads_from_trace(trace: pd.DataFrame) -> dict[int, dict[int, int]]:
     """Rebuild the squad held after each gameweek's transfers, from a paper-manager trace.
 
@@ -219,8 +226,8 @@ def squads_from_trace(trace: pd.DataFrame) -> dict[int, dict[int, int]]:
         if row.chip == "freehit":
             squads[int(row.gameweek)] = dict(held)
             continue
-        outs = [int(e) for e in str(row.transfers_out).split() if e]
-        ins = [int(e) for e in str(row.transfers_in).split() if e]
+        outs = _elements(row.transfers_out)
+        ins = _elements(row.transfers_in)
         for e in outs:
             held.pop(e, None)
         for e in ins:

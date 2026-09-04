@@ -434,3 +434,18 @@ def test_locked_players_are_in_the_squad_without_being_captain(points, universe,
     assert outsider in plan.squads[GAMEWEEKS[0]]
     assert plan.captains[GAMEWEEKS[0]] != outsider
     assert plan.objective < opening.objective
+
+
+def test_roadmap_with_no_playable_chip_is_empty(points, universe, windows, con):
+    """Gameweeks outside every window (2019-20's 39-47 under the live windows) must not crash."""
+    from fplass.optimise import chips
+
+    state = SquadState(players={}, bank=1000, free_transfers=15)
+    plan = solve_scenario(points, universe, state, windows, allow_chips=False)
+    samples = points.to_numpy()[None, :, :]
+    late = ChipWindows(windows={"wildcard": [(2, 19)], "freehit": [(2, 19)], "bboost": [(1, 19)], "3xc": [(1, 19)]})
+    roadmap = chips.build_roadmap(
+        con, samples, points.index.to_numpy(), __import__("numpy").array([40, 41, 42]), universe,
+        state, plan, late, "2019-20", wildcard_candidates=0,
+    )
+    assert roadmap.schedule == {} and roadmap.valuations.empty

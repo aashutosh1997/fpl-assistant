@@ -664,6 +664,45 @@ def _replay_task(args: tuple) -> dict[str, object]:
     return summary
 
 
+def summary_from_trace(path: Path) -> dict[str, object]:
+    """A season's summary row rebuilt from its trace file."""
+    trace = pd.read_csv(path)
+    chips = ",".join(
+        f"{r.chip}@GW{r.gameweek}" for r in trace.itertuples() if isinstance(r.chip, str) and r.chip
+    )
+    transfers = trace["transfers_in"].iloc[1:].map(
+        lambda cell: len(cell.split()) if isinstance(cell, str) else 0
+    )
+    return {
+        "season": str(trace["season"].iloc[0]),
+        "policy": str(trace["policy"].iloc[0]),
+        "gameweeks": int(len(trace)),
+        "points": int(trace["points"].sum()),
+        "expected": round(float(trace["expected"].sum()), 1),
+        "hits": int(trace["hits"].sum()),
+        "transfers": int(transfers.sum()),
+        "auto_subs": int(trace["auto_subs"].sum()),
+        "sub_points": int(trace["sub_points"].sum()),
+        "bench_expected": round(float(trace["bench_expected"].sum()), 1),
+        "bench_points": int(trace["bench_points"].sum()),
+        "captain_points": int(trace["captain_points"].sum()),
+        "chips": chips,
+        "final_value": int(trace["squad_value"].iloc[-1]),
+    }
+
+
+def summaries(policy: str, config: PolicyConfig, version: str | None, out_dir: Path = BACKTEST) -> pd.DataFrame:
+    """Summary rows for every season trace of a run, rebuilt from the files."""
+    tag = run_tag(policy, config, version)
+    rows = [summary_from_trace(p) for p in sorted(out_dir.glob(f"manager_{tag}_20*.csv"))]
+    table = pd.DataFrame(rows)
+    if not table.empty:
+        table["panel"] = version or "warehouse"
+        table["config"] = config.tag()
+        table.to_csv(out_dir / f"manager_{tag}_summary.csv", index=False)
+    return table
+
+
 def run_tag(policy: str, config: PolicyConfig, version: str | None) -> str:
     parts = [policy, config.tag()]
     if version:

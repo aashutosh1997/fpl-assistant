@@ -418,6 +418,24 @@ def backtest_manager(
     )
 
 
+@backtest_app.command("summary")
+def backtest_summary(
+    policy: str = typer.Option("current", help="Whose traces to summarise."),
+    config: str = typer.Option(None, help="The traces' planner config, as given to `manager`."),
+    panel_version: str = typer.Option(None, help="The panel version the traces were played on."),
+) -> None:
+    """Season totals rebuilt from a run's trace files."""
+    from .backtest import manager as manager_module
+
+    settings = manager_module.PolicyConfig.parse(config)
+    table = manager_module.summaries(policy, settings, panel_version)
+    if table.empty:
+        typer.echo("No traces found.")
+        return
+    typer.echo(table.to_string(index=False))
+    typer.echo(f"\n{policy} [{settings.tag()}]: {table['points'].mean():.0f} points a season over {len(table)} season(s)")
+
+
 @backtest_app.command("options")
 def backtest_options(
     policy: str = typer.Option("current", help="Whose traces to measure on."),

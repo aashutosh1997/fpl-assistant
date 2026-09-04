@@ -143,3 +143,12 @@ def test_terminal_value_stops_the_solver_selling_the_future():
     with_edge = milp.solve(points, universe, held, windows, gameweeks=gameweeks,
                            allow_chips=False, time_limit=30, terminal_value=beyond)
     assert sleeper in with_edge.squads[2], "kept for what comes after the horizon"
+
+
+def test_squads_from_trace_tolerates_empty_cells_read_back_as_nan():
+    trace = pd.DataFrame(
+        {"gameweek": [1, 2], "chip": ["", ""], "transfers_in": ["1 2", float("nan")],
+         "transfers_out": [float("nan"), float("nan")]}
+    )
+    squads = value.squads_from_trace(trace)
+    assert set(squads[1]) == {1, 2} and set(squads[2]) == {1, 2}

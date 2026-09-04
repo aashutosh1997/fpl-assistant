@@ -400,6 +400,17 @@ def build_roadmap(
 
     # dataclasses.asdict, not vars(): these are slots dataclasses and have no __dict__.
     valuations = pd.DataFrame([asdict(r) for r in rows])
+    if valuations.empty:
+        # No chip is legal in any gameweek of the horizon (all windows used, or the horizon
+        # lies outside every window, as 2019-20's post-suspension gameweeks 39-47 do under
+        # the live windows). Nothing to schedule, and nothing to merge fixtures onto.
+        return ChipRoadmap(
+            schedule={},
+            valuations=pd.DataFrame(
+                columns=["chip", "gameweek", "window", "mean_gain", "upside_gain", "note"]
+            ),
+            notes=["No chip is playable in this horizon."],
+        )
 
     # Fixture context, which is what actually drives chip timing.
     fixtures = double_blank_summary(con, season, horizon)
