@@ -134,6 +134,43 @@ chip roadmap, transfer solve, lineup, captain, executed at the deadline's real p
 sell-on fee, and scored with the game's automatic substitutions, vice-captain and chip rules.
 Its season totals are the number every change to the planner is judged by.
 
+| Season | Planner | Opening squad held all season | Hits taken |
+|---|---|---|---|
+| 2017-18 | 2,100 | 1,490 | 23 |
+| 2018-19 | 2,238 | 1,905 | 14 |
+| 2019-20 | 2,193 | 1,923 | 10 |
+| 2020-21 | 2,258 | 1,427 | 38 |
+| 2021-22 | 2,320 | 2,307 | 44 |
+| 2022-23 | 2,234 | 1,589 | 25 |
+| 2023-24 | 2,385 | 1,718 | 21 |
+| 2024-25 | 2,400 | 2,054 | 10 |
+| 2025-26 | 2,000 | 1,528 | 8 |
+| **mean** | **2,236** | **1,771** | **21** |
+
+The planner is blind to injury news except through the order book, has no rivals to play
+against, and never chases a price rise, so this is a floor on what the live advisor sees. It
+still beats the opening squad by 465 points a season and lands in the range of a good human
+season. The hits column is the first thing the replay put a number on: 21 a season, 86 points,
+which the option values below are the measured answer to.
+
+### What the replay measured
+
+Every constant the planner used to carry by assertion now has a number from the replay
+(`fpl backtest options`, `chips`, `revisions`), and the live report prints the ones that matter
+for the week:
+
+| Quantity | Was | Measured |
+|---|---|---|
+| Bench place, as a share of a starting place | 0.12 | **0.21** — substitutes delivered 21% of what the plan expected of the bench, every season between 0.15 and 0.28 |
+| A banked transfer, one week ahead | 0.25 pts | up to **3.6 pts**: the second-best swap next week is worth 8.7 projected points on average, so the hit it saves is usually the full four. An upper bound — the same projected gains are what buy the 21 hits a season |
+| 0.1m / 0.5m / 1.0m in the bank | 0 | **0.30 / 1.27 / 2.33 pts** of improvement in next week's best swap |
+| A likely starter collapsing to a likely absentee by the next deadline | — | **4.0%** of weeks; a nailed player's remaining-horizon projection moves by 14–19% a week, a fringe player's by 50–100% |
+| Availability news arriving in the final week | 24% | **7%** (38% of flags land in the last two days), from the hourly snapshots |
+| Chip timing | flat floors | a continuation value by weeks left: on the replayed seasons it beat the floors by about 7 points a season, almost all of it the second-half triple captain (11.4 against 7.3) and the first-half free hit (10.2 against 6.6) |
+
+Which of those replace the live constants is decided the same way — the variant replayed over
+the nine seasons, paired season by season against the baseline above.
+
 ### The order book
 
 `selected`, `transfers_in` and `transfers_out` exist for every historical player-gameweek and
