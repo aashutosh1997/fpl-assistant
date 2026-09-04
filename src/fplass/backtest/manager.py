@@ -69,7 +69,9 @@ class GameweekRecord:
     captain: int
     captain_points: int  # the extra copy (or two) of the armband holder's score
     auto_subs: int
+    sub_points: int  # points delivered by the substitutes who came on
     bench_points: int  # points left on the bench after substitutions
+    bench_expected: float  # what the plan expected the four bench players to score
     bank: int  # after this gameweek's transfers
     free_transfers: int  # entering the gameweek
     squad_value: int  # selling value of the squad plus bank, after transfers
@@ -97,6 +99,8 @@ class SeasonReplay:
             "hits": sum(r.hits for r in self.records),
             "transfers": sum(len(r.transfers_in) for r in self.records[1:]),
             "auto_subs": sum(r.auto_subs for r in self.records),
+            "sub_points": sum(r.sub_points for r in self.records),
+            "bench_expected": round(sum(r.bench_expected for r in self.records), 1),
             "bench_points": sum(r.bench_points for r in self.records),
             "captain_points": sum(r.captain_points for r in self.records),
             "chips": chips,
@@ -121,6 +125,8 @@ class SeasonReplay:
                     "captain": r.captain,
                     "captain_points": r.captain_points,
                     "auto_subs": r.auto_subs,
+                    "sub_points": r.sub_points,
+                    "bench_expected": round(r.bench_expected, 2),
                     "bench_points": r.bench_points,
                     "bank": r.bank,
                     "free_transfers": r.free_transfers,
@@ -200,8 +206,9 @@ def score_gameweek(
     """Points a squad scored, the way the game scores it.
 
     Returns:
-        ``(total, captain_extra, bench_points, auto_subs)``. ``total`` includes the captain's
-        extra copy; hits are the caller's business.
+        ``(total, captain_extra, bench_points, auto_subs, sub_points)``. ``total`` includes the
+        captain's extra copy and whatever the substitutes who came on scored; hits are the
+        caller's business.
     """
     everyone = list(lineup) + list(bench)
     played = {e: minutes.get(e, 0) > 0 for e in everyone}
@@ -219,7 +226,8 @@ def score_gameweek(
     else:
         extra = (multiplier - 1) * points.get(armband, 0)
     benched = sum(points.get(e, 0) for e in everyone if e not in eleven)
-    return base + extra, extra, benched, subs
+    came_on = sum(points.get(e, 0) for e in eleven if e not in set(lineup))
+    return base + extra, extra, benched, subs, came_on
 
 
 def next_free_transfers(available: int, made: int, chip: str | None) -> tuple[int, int]:
@@ -454,9 +462,10 @@ def execute_gameweek(
     vice = max(others, key=lambda e: float(week.get(e, 0.0))) if others else None
 
     points, minutes = actual_gameweek(con, season, gameweek)
-    raw, captain_extra, benched, subs = score_gameweek(
+    raw, captain_extra, benched, subs, came_on = score_gameweek(
         lineup, bench, captain, vice, chip, positions, points, minutes
     )
+    bench_expected = float(sum(float(week.get(e, 0.0)) for e in bench))
 
     if chip == "freehit":
         # The free-hit squad plays this week; the real squad and the bank are untouched.
@@ -489,7 +498,9 @@ def execute_gameweek(
         captain=captain,
         captain_points=captain_extra,
         auto_subs=subs,
+        sub_points=came_on,
         bench_points=benched,
+        bench_expected=bench_expected,
         bank=bank,
         free_transfers=state.free_transfers,
         squad_value=value,

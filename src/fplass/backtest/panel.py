@@ -334,8 +334,25 @@ def load_into_warehouse(con, paths: list[Path]) -> int:
     return total
 
 
-def scored_panel(con, seasons: list[str] | None = None) -> pd.DataFrame:
-    """Panel rows joined to what actually happened, with ``weeks_ahead`` attached."""
+def panel_files(version: str, out_dir: Path = PANEL) -> list[Path]:
+    """The parquet files of one panel version, oldest season first."""
+    return sorted(out_dir.glob(f"*.{version}.parquet"))
+
+
+def _panel_relation(sources: list[Path] | None) -> str:
+    if sources:
+        files = ", ".join(f"'{p}'" for p in sources)
+        return f"read_parquet([{files}])"
+    return "projection_panel"
+
+
+def scored_panel(
+    con, seasons: list[str] | None = None, *, sources: list[Path] | None = None
+) -> pd.DataFrame:
+    """Panel rows joined to what actually happened, with ``weeks_ahead`` attached.
+
+    Reads the warehouse table, or a panel version's parquet files when ``sources`` is given.
+    """
     season_filter = ""
     params: list[object] = []
     if seasons:
@@ -353,7 +370,7 @@ def scored_panel(con, seasons: list[str] | None = None) -> pd.DataFrame:
                st.gw_seq - sa.gw_seq AS weeks_ahead,
                a.minutes, a.total_points,
                CASE WHEN a.minutes >= 60 THEN 1.0 ELSE 0.0 END AS played_full
-        FROM projection_panel p
+        FROM {_panel_relation(sources)} p
         JOIN actual a ON a.season = p.season AND a.element = p.element AND a.gw = p.target_gw
         JOIN seq sa ON sa.season = p.season AND sa.gw = p.as_of_gw
         JOIN seq st ON st.season = p.season AND st.gw = p.target_gw
@@ -363,13 +380,15 @@ def scored_panel(con, seasons: list[str] | None = None) -> pd.DataFrame:
     ).fetchdf()
 
 
-def score_panel(con, seasons: list[str] | None = None) -> pd.DataFrame:
+def score_panel(
+    con, seasons: list[str] | None = None, *, sources: list[Path] | None = None
+) -> pd.DataFrame:
     """Accuracy per season and weeks ahead: the ten-season backtest of the whole pipeline.
 
     ``spearman`` and ``top30_lift`` are computed within each deadline and averaged, so a season
     with more gameweeks does not weigh more, and lift is against the gameweek's own mean.
     """
-    frame = scored_panel(con, seasons)
+    frame = scored_panel(con, seasons, sources=sources)
     if frame.empty:
         return frame
 

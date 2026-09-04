@@ -264,6 +264,8 @@ def solve(
     chip_schedule: dict[int, str] | None = None,
     forbidden: list[dict] | None = None,
     lock: dict[int, list[int]] | None = None,
+    terminal_value: pd.Series | None = None,
+    terminal_bank_value: float = 0.0,
     time_limit: int = 120,
     msg: bool = False,
 ) -> Plan:
@@ -298,6 +300,15 @@ def solve(
             inflated points, which also makes him captain and distorts the rest of the squad.
         forbidden: Previously found solutions to exclude, so the solver can be called repeatedly
             to build a pool of distinct near-optimal plans for the league-aware stage.
+        terminal_value: Points credited for each player owned in the final gameweek of the
+            horizon, indexed by element. Without it the horizon is a cliff: a player who
+            scores nothing after its last week is worth nothing to hold, so the last weeks of
+            every plan sell the future for the present (five moves in the final week, a striker
+            with a run of fixtures just past the edge sold for one who has them just inside).
+            The natural value is a share of the player's expected points in the weeks beyond
+            the horizon, with the share measured by the paper manager.
+        terminal_bank_value: Points per 0.1m left in the bank at the end of the horizon, so
+            money kept back for a later move is not treated as wasted.
         time_limit: Solver time limit in seconds.
 
     Returns:
@@ -552,6 +563,19 @@ def solve(
             # distribution, which is what a triple captain should actually be chosen on.
             best = max((points[e, gw] for e in elements), default=0.0)
             contributions.append(best * triple)
+
+    last = gameweeks[-1]
+    if terminal_value is not None:
+        for e in elements:
+            worth = float(terminal_value.get(e, 0.0)) if e in terminal_value.index else 0.0
+            if worth:
+                contributions.append(worth * squad[e, last])
+    if terminal_bank_value:
+        # The bank after the final gameweek's dealings, in tenths.
+        final_bank = current.bank - pulp.lpSum(
+            price[e] * bought[e, gw] - sell[e] * sold[e, gw] for e in elements for gw in gameweeks
+        )
+        contributions.append(terminal_bank_value * final_bank)
 
     problem += (
         pulp.lpSum(contributions)

@@ -65,23 +65,24 @@ def test_captaincy_passes_to_the_vice_when_the_captain_does_not_play():
     points[13] = 10
     points[8] = 6
     minutes = {e: 90 for e in POSITIONS}
-    total, extra, benched, subs = manager.score_gameweek(
+    total, extra, benched, subs, came_on = manager.score_gameweek(
         LINEUP, BENCH, 13, 8, None, POSITIONS, points, minutes
     )
     assert extra == 10 and total == sum(points[e] for e in LINEUP) + 10 and subs == 0
-    assert benched == sum(points[e] for e in BENCH)
+    assert benched == sum(points[e] for e in BENCH) and came_on == 0
 
     minutes[13] = 0
     points[13] = 0
-    total, extra, benched, subs = manager.score_gameweek(
+    total, extra, benched, subs, came_on = manager.score_gameweek(
         LINEUP, BENCH, 13, 8, None, POSITIONS, points, minutes
     )
     assert extra == 6, "the vice-captain is doubled instead"
     assert subs == 1, "and the absent captain is substituted"
+    assert came_on == 2, "the substitute's points are counted"
 
     minutes[8] = 0
     points[8] = 0
-    _, extra, _, _ = manager.score_gameweek(LINEUP, BENCH, 13, 8, None, POSITIONS, points, minutes)
+    _, extra, _, _, _ = manager.score_gameweek(LINEUP, BENCH, 13, 8, None, POSITIONS, points, minutes)
     assert extra == 0, "nobody is doubled when both are absent"
 
 
@@ -89,12 +90,12 @@ def test_triple_captain_and_bench_boost():
     points = {e: 1 for e in POSITIONS}
     points[13] = 8
     minutes = {e: 90 for e in POSITIONS}
-    total, extra, _, _ = manager.score_gameweek(
+    total, extra, _, _, _ = manager.score_gameweek(
         LINEUP, BENCH, 13, 8, "3xc", POSITIONS, points, minutes
     )
     assert extra == 16
     minutes[4] = 0
-    total, _, benched, subs = manager.score_gameweek(
+    total, _, benched, subs, _ = manager.score_gameweek(
         LINEUP, BENCH, 13, 8, "bboost", POSITIONS, points, minutes
     )
     assert subs == 0 and benched == 0 and total == sum(points.values()) + 8

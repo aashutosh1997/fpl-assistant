@@ -330,15 +330,22 @@ def backtest_panel(
 def backtest_score(
     seasons: str = typer.Option("all", help="Comma-separated seasons, or 'all'."),
     weeks_ahead: int = typer.Option(0, help="Horizon to report; -1 for every horizon."),
+    panel_version: str = typer.Option(
+        None, help="Score a panel version's parquet files (e.g. panel.1) instead of the warehouse."
+    ),
 ) -> None:
     """Score the projection panel against what happened, per season and horizon."""
     from .backtest import panel as panel_module
     from .ingest.warehouse import connect
 
+    sources = panel_module.panel_files(panel_version) if panel_version else None
+    if panel_version and not sources:
+        typer.echo(f"No parquet files for panel version {panel_version}.")
+        return
     con = connect(read_only=True)
     try:
         chosen = None if seasons == "all" else [s.strip() for s in seasons.split(",")]
-        table = panel_module.score_panel(con, chosen)
+        table = panel_module.score_panel(con, chosen, sources=sources)
     finally:
         con.close()
     if table.empty:
