@@ -37,8 +37,9 @@ import pandas as pd
 log = logging.getLogger(__name__)
 
 # Probability that a player's availability materially changes between now and the deadline, by how
-# far out we are. Derived from how often `chance_of_playing` is revised in the final days before a
-# deadline; the shape matters more than the exact values, which the snapshot history refines.
+# far out we are. These are the fallback: once two transfer windows have been logged the table is
+# measured from the hourly snapshots instead (see fplass.options.news), and the first two windows
+# of 2026/27 put the week-out figure near 0.07, not 0.24.
 NEWS_RISK_BY_DAYS = {0: 0.02, 1: 0.06, 2: 0.11, 3: 0.15, 4: 0.18, 5: 0.20, 6: 0.22, 7: 0.24}
 
 # Points typically lost by owning a player who turns out not to play, versus the alternative you
@@ -86,9 +87,16 @@ def budget_shadow_price(
     return float(value)
 
 
-def news_risk(days_to_deadline: float) -> float:
-    """Probability that materially new team news arrives before the deadline."""
+def news_risk(days_to_deadline: float, table: pd.Series | None = None) -> float:
+    """Probability that materially new team news arrives before the deadline.
+
+    Args:
+        table: A measured risk by whole days from :func:`fplass.options.news.news_risk_table`;
+            the constants above are used when none is available.
+    """
     day = int(np.clip(np.floor(days_to_deadline), 0, 7))
+    if table is not None and day in table.index:
+        return float(table.loc[day])
     return NEWS_RISK_BY_DAYS[day]
 
 
@@ -99,6 +107,7 @@ def decide(
     days_to_deadline: float,
     points_per_tenth: float,
     mistake_cost: float = NEWS_MISTAKE_COST,
+    risk_table: pd.Series | None = None,
 ) -> pd.DataFrame:
     """Recommend buy-now or wait for each intended transfer.
 
@@ -108,6 +117,7 @@ def decide(
         days_to_deadline: How long until you must commit.
         points_per_tenth: The budget shadow price from :func:`budget_shadow_price`.
         mistake_cost: Points lost by committing to a player who turns out not to play.
+        risk_table: Measured news risk by days to go, when the snapshots can supply one.
 
     Returns:
         One row per target, with the two competing values made explicit so the recommendation can
@@ -117,7 +127,7 @@ def decide(
     merged["p_rise"] = merged["p_rise"].fillna(0.0)
     merged["p_fall"] = merged["p_fall"].fillna(0.0)
 
-    risk = news_risk(days_to_deadline)
+    risk = news_risk(days_to_deadline, risk_table)
     merged["value_of_rise"] = merged["p_rise"] * points_per_tenth
     # Waiting is only worth something if news could still change the decision, and only in
     # proportion to how much a wrong pick would cost.

@@ -28,6 +28,7 @@ import pandas as pd
 from .api import FPLAPIError, FPLClient
 from .features import flow as flow_module
 from .ingest.sources import CURRENT_SEASON
+from .options import news as news_module
 from .options import revisions as revisions_module
 from .options import value as value_module
 from .optimise import chips as chips_module
@@ -535,6 +536,22 @@ def _price_stage(
     if deadline is not None:
         days = max((deadline - dt.datetime.now(dt.UTC)).total_seconds() / 86400.0, 0.0)
 
+    # News risk measured from the logged windows, when there are enough of them.
+    risk_table = None
+    try:
+        snapshots = price_snapshots if price_snapshots is not None else calibrate_module.load_snapshots(PRICE_SNAPSHOTS)
+        risk_table = news_module.news_risk_table(
+            snapshots, news_module.deadlines_from_warehouse(con, CURRENT_SEASON)
+        )
+    except (FileNotFoundError, KeyError, ValueError):
+        risk_table = None
+    if risk_table is not None:
+        notes.append(
+            "News risk before a deadline is now measured from the hourly snapshots: "
+            + ", ".join(f"{int(d)}d {float(v):.1%}" for d, v in risk_table.items() if d in (1, 2, 4, 7))
+            + " (the built-in table assumed 6%, 11%, 18%, 24%)."
+        )
+
     def solve_with_bank(extra: int) -> float:
         adjusted = milp.SquadState(
             players=dict(squad.players),
@@ -562,7 +579,11 @@ def _price_stage(
     ]
     advice = (
         decide_module.decide(
-            targets, probabilities, days_to_deadline=days, points_per_tenth=points_per_tenth
+            targets,
+            probabilities,
+            days_to_deadline=days,
+            points_per_tenth=points_per_tenth,
+            risk_table=risk_table,
         )
         if len(targets)
         else pd.DataFrame()
