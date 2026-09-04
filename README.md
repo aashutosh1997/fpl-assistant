@@ -15,6 +15,12 @@ chip timing against it — for winning mini-leagues, not just for scoring points
   when you are ahead, without a risk dial to guess.
 - **Tracks prices** hourly and decides buy-now versus wait-for-team-news using the optimiser's own
   shadow price on budget.
+- **Replays ten seasons** to validate itself: every deadline of the completed seasons is projected
+  again with only what was knowable at it, and the planner plays each season through and is
+  scored the way the game scores it. Every constant in the planner is measured against that.
+- **Reads the order book.** What eleven million managers did before a deadline predicts who then
+  fails to appear; ten seasons of their transfers stand in for the availability news history never
+  recorded, and the same signal is read live.
 
 ## Quick start
 
@@ -32,6 +38,14 @@ python -m fplass.cli prices status
 # after each gameweek
 python -m fplass.cli ingest gameweek 1
 python -m fplass.cli calibrate                   # score past projections, refit the model
+
+# the ten-season replay (hours, not minutes; run detached)
+python -m fplass.cli backtest panel --workers 4    # as-of projections for every past deadline
+python -m fplass.cli backtest score                # the pipeline's accuracy, season by horizon
+python -m fplass.cli backtest manager --workers 4  # play each season with the planner, in points
+python -m fplass.cli backtest options              # what a transfer, the bank and the bench are worth
+python -m fplass.cli backtest chips                # chip timing: floors vs continuation vs hindsight
+python -m fplass.cli backtest revisions            # how far projections move week to week
 ```
 
 Your team id is the number in your `fantasy.premierleague.com/entry/<ID>/` URL. Everything uses
@@ -64,7 +78,8 @@ Other components are validated where they can be:
 | Team strength | Cross-validated; GW1 predicted 28.4 goals vs 30 actual, 5.2 clean sheets vs 6 |
 | Player ranking | GW1 top-30 by projection scored 2.05x the league average |
 | DEFCON reconstruction | Identity verified exactly against 2025-26 actuals |
-| Minutes model | **This is the weak component — see below** |
+| Minutes model | Brier skill 0.51–0.59 one week ahead in every replayed season (see below) |
+| **Whole pipeline, replayed** | **Nine seasons, 2.2 million as-of projections: one-week Spearman 0.66–0.69, top-30 lift 3.2–4.5x** |
 
 ### What gameweek 1 taught us
 
@@ -91,6 +106,45 @@ than on history, so it improves every week and does nothing at all when there is
 calibrate against. Re-running GW1 with it, the model's squad scores **42 instead of 34** — though
 that number is in-sample, and GW2 is the honest test.
 
+### The ten-season replay
+
+The live table above scores one honest prediction a week. `fpl backtest panel` replays every
+deadline of the nine completed seasons since 2017-18 the same way — team strength fitted on
+results before the gameweek's first kickoff, the minutes model with the season held out, rates
+cut at the gameweek, the player pool, clubs and prices as they stood that week — and stores the
+projection for the next twelve gameweeks. Scored against what happened:
+
+| Weeks ahead | Spearman (EP vs points) | Top-30 lift | Minutes Brier | Minutes skill |
+|---|---|---|---|---|
+| 0 (the deadline's week) | 0.67 | 3.7x | 0.097 | 0.55 |
+| 1 | 0.63 | 3.5x | 0.118 | 0.45 |
+| 3 | 0.58 | 3.3x | 0.141 | 0.35 |
+| 7 | 0.53 | 3.1x | 0.162 | 0.25 |
+| 11 | 0.50 | 3.0x | 0.176 | 0.19 |
+
+Every season sits within a few hundredths of those means, and the live 2026/27 gameweeks land in
+the same range (GW2: 0.64 and 3.9x), which is the point: the replay is an honest stand-in for
+the live model. The first attempt was not — a query that kept "every season but this one"
+quietly included the *future* seasons in a replay, and the minutes model showed no skill on any
+replayed season but the last. That leak is now pinned by a test that compares serving-path and
+training-path features player by player.
+
+`fpl backtest manager` then plays each season with the planner exactly as `fpl plan` runs it:
+chip roadmap, transfer solve, lineup, captain, executed at the deadline's real prices with the
+sell-on fee, and scored with the game's automatic substitutions, vice-captain and chip rules.
+Its season totals are the number every change to the planner is judged by.
+
+### The order book
+
+`selected`, `transfers_in` and `transfers_out` exist for every historical player-gameweek and
+were quarantined as post-hoc. The timing is the other way round: ownership change tracks the
+same gameweek's net transfers at 0.89–0.97 in every season, so a gameweek's flow happened
+*before* its deadline. Among established starters, the top decile of owners selling then failed
+to appear 19.5% of the time against a 6.7% base rate; the top two percent 34.5%. A small layer on
+the base minutes model — a logistic on its log-odds and the two flows — improves the held-out
+Brier score in all ten seasons by 2–4.5%, with coefficients stable to two decimals across
+seasons. It is applied to the deadline's own gameweek, in the replay and live.
+
 ## Known limitations
 
 Stated because they affect how much to trust an answer, not buried:
@@ -114,9 +168,11 @@ src/fplass/
   api.py            FPL public API client (cached, retrying)
   scoring.py        the points function — the foundation everything rests on
   ingest/           eleven seasons into DuckDB, plus the leakage-proof as_of view
-  features/         team strength, minutes, per-90 rates, BPS
+  features/         team strength, minutes, per-90 rates, BPS, the order-flow layer
   sim/              Monte Carlo engine
   optimise/         transfer MILP, chip roadmap, mini-league objective
+  options/          what flexibility is worth: revisions, transfer/bank/bench values, chip timing, news risk
+  backtest/         the projection panel, the paper manager, live calibration
   prices/           snapshots, calibration, buy-now-or-wait
   report/           the HTML dashboard published as an Artifact
   advise.py         the pipeline behind `fpl plan`
