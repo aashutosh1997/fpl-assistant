@@ -19,8 +19,12 @@ app = typer.Typer(
 )
 prices_app = typer.Typer(no_args_is_help=True, help="Price tracking and price-rise optimisation.")
 ingest_app = typer.Typer(no_args_is_help=True, help="Load data into the warehouse.")
+backtest_app = typer.Typer(
+    no_args_is_help=True, help="Ten-season replays: the projection panel and the paper manager."
+)
 app.add_typer(prices_app, name="prices")
 app.add_typer(ingest_app, name="ingest")
+app.add_typer(backtest_app, name="backtest")
 
 
 @app.callback()
@@ -262,6 +266,87 @@ def calibrate_command(
         typer.echo(report.summary())
     finally:
         con.close()
+
+
+def _parse_gameweeks(spec: str | None) -> list[int] | None:
+    """'1-5,20' -> [1, 2, 3, 4, 5, 20]; None or 'all' -> None (every gameweek)."""
+    if spec is None or spec.strip().lower() == "all":
+        return None
+    chosen: list[int] = []
+    for part in spec.split(","):
+        part = part.strip()
+        if "-" in part:
+            low, high = part.split("-", 1)
+            chosen.extend(range(int(low), int(high) + 1))
+        elif part:
+            chosen.append(int(part))
+    return chosen
+
+
+@backtest_app.command("panel")
+def backtest_panel(
+    seasons: str = typer.Option("all", help="Comma-separated seasons, or 'all' completed ones."),
+    horizon: int = typer.Option(8, help="Gameweeks projected from each deadline."),
+    draws: int = typer.Option(2000, help="Monte Carlo draws per deadline."),
+    workers: int = typer.Option(1, help="Seasons replayed in parallel processes."),
+    gameweeks: str = typer.Option(None, help="Deadlines to replay, e.g. '1-38' or '20,21'."),
+) -> None:
+    """Replay every deadline of completed seasons and store the as-of projections.
+
+    This is the ten-season backtest of the whole pipeline and the price history the option
+    values are measured from. Roughly twenty seconds a deadline; use --workers to parallelise.
+    """
+    from .backtest import panel as panel_module
+    from .ingest.warehouse import connect
+
+    # Read the season list and close again before the workers start: DuckDB refuses a
+    # read-only open while another process holds the file read-write.
+    con = connect(read_only=True)
+    try:
+        chosen = (
+            panel_module.panel_seasons(con)
+            if seasons == "all"
+            else [s.strip() for s in seasons.split(",")]
+        )
+    finally:
+        con.close()
+
+    paths = panel_module.build_panel(
+        chosen,
+        horizon=horizon,
+        n_draws=draws,
+        workers=workers,
+        gameweeks=_parse_gameweeks(gameweeks),
+    )
+    con = connect()
+    try:
+        loaded = panel_module.load_into_warehouse(con, paths)
+    finally:
+        con.close()
+    typer.echo(f"loaded {loaded:,} panel rows from {len(paths)} season(s)")
+
+
+@backtest_app.command("score")
+def backtest_score(
+    seasons: str = typer.Option("all", help="Comma-separated seasons, or 'all'."),
+    weeks_ahead: int = typer.Option(0, help="Horizon to report; -1 for every horizon."),
+) -> None:
+    """Score the projection panel against what happened, per season and horizon."""
+    from .backtest import panel as panel_module
+    from .ingest.warehouse import connect
+
+    con = connect(read_only=True)
+    try:
+        chosen = None if seasons == "all" else [s.strip() for s in seasons.split(",")]
+        table = panel_module.score_panel(con, chosen)
+    finally:
+        con.close()
+    if table.empty:
+        typer.echo("No panel rows stored. Run `fpl backtest panel` first.")
+        return
+    if weeks_ahead >= 0:
+        table = table[table["weeks_ahead"] == weeks_ahead]
+    typer.echo(table.to_string(index=False))
 
 
 if __name__ == "__main__":

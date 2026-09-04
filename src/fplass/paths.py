@@ -16,8 +16,11 @@ WAREHOUSE = DATA / "warehouse"
 DB_PATH = Path(os.environ.get("FPLASS_DB", WAREHOUSE / "fpl.duckdb"))
 CACHE = Path(os.environ.get("FPLASS_CACHE", DATA / "cache"))
 CONFIG = ROOT / "config"
+# Per-season parquet files of as-of projections, written by panel workers on read-only
+# connections and loaded into the warehouse in one pass afterwards.
+PANEL = DATA / "panel"
 
 
 def ensure_dirs() -> None:
-    for d in (DATA, SNAPSHOTS, PRICE_SNAPSHOTS, RAW, WAREHOUSE, CACHE, CONFIG):
+    for d in (DATA, SNAPSHOTS, PRICE_SNAPSHOTS, RAW, WAREHOUSE, CACHE, CONFIG, PANEL):
         d.mkdir(parents=True, exist_ok=True)

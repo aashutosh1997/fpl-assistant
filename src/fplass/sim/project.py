@@ -132,27 +132,75 @@ def _price_snapshots() -> pd.DataFrame | None:
     return load_price_snapshots()
 
 
-def current_players(con, season: str = CURRENT_SEASON) -> pd.DataFrame:
+def current_players(
+    con, season: str = CURRENT_SEASON, *, as_of_gameweek: int | None = None
+) -> pd.DataFrame:
     """Every selectable player with price, position and club.
+
+    With ``as_of_gameweek`` the table is rebuilt as it stood at that gameweek's deadline of a
+    *historical* season, which is what the projection panel needs. Three things differ from the
+    season-end reference table, and each one would otherwise leak or mislead:
+
+    * **The pool** is the players registered by that gameweek. The community dataset records a
+      row for every registered player every gameweek, played or not, so "registered by
+      gameweek g" is "has a row at or before g" — a January signing does not exist in August.
+    * **The club** is the one each player was attached to that week, read from the fixture his
+      row belongs to. ``players.team_id`` is the end-of-season club, which would project a
+      February mover for the wrong side all autumn.
+    * **The price** is the ``value`` recorded for that gameweek, which is the price at its
+      deadline; ``start_cost`` stands in only for a player with no recorded value.
+
+    Only the row's existence, fixture and price are read, never its minutes or points, so a row
+    from the gameweek being projected is deadline information and not an outcome.
 
     ``position`` needs the explicit ``AS`` keyword — it is a reserved word in DuckDB and the
     query is a parse error without it.
     """
+    if as_of_gameweek is None:
+        return con.execute(
+            """
+            SELECT
+                pl.element, pl.code, pl.web_name, pl.team_id, pl.element_type,
+                CASE pl.element_type WHEN 1 THEN 'GKP' WHEN 2 THEN 'DEF'
+                                     WHEN 3 THEN 'MID' ELSE 'FWD' END AS position,
+                pl.start_cost,
+                pl.start_cost AS price,
+                t.short_name AS team
+            FROM players pl
+            LEFT JOIN teams t ON t.season = pl.season AND t.team_id = pl.team_id
+            WHERE pl.season = ?
+            ORDER BY pl.element
+            """,
+            [season],
+        ).fetchdf()
+
     return con.execute(
         """
+        WITH registered AS (
+            SELECT
+                p.element,
+                arg_max(CASE WHEN p.was_home THEN f.team_h ELSE f.team_a END, p.gw) AS club,
+                arg_max(p.value, p.gw) AS price
+            FROM player_gw p
+            JOIN fixtures f ON f.season = p.season AND f.fixture_id = p.fixture_id
+            WHERE p.season = ? AND p.gw <= ?
+            GROUP BY p.element
+        )
         SELECT
-            pl.element, pl.code, pl.web_name, pl.team_id, pl.element_type,
+            pl.element, pl.code, pl.web_name,
+            COALESCE(r.club, pl.team_id) AS team_id, pl.element_type,
             CASE pl.element_type WHEN 1 THEN 'GKP' WHEN 2 THEN 'DEF'
                                  WHEN 3 THEN 'MID' ELSE 'FWD' END AS position,
             pl.start_cost,
-            pl.start_cost AS price,
+            CAST(COALESCE(r.price, pl.start_cost) AS INTEGER) AS price,
             t.short_name AS team
         FROM players pl
-        LEFT JOIN teams t ON t.season = pl.season AND t.team_id = pl.team_id
+        JOIN registered r ON r.element = pl.element
+        LEFT JOIN teams t ON t.season = pl.season AND t.team_id = COALESCE(r.club, pl.team_id)
         WHERE pl.season = ?
         ORDER BY pl.element
         """,
-        [season],
+        [season, as_of_gameweek, season],
     ).fetchdf()
 
 
@@ -387,6 +435,7 @@ def build_projection_inputs(
     *,
     availability: pd.DataFrame | None = None,
     as_of_gameweek: int | None = None,
+    historical: bool = False,
 ) -> tuple[pd.DataFrame, np.ndarray]:
     """Build the player-match frame and minutes probabilities for the requested gameweeks.
 
@@ -398,15 +447,20 @@ def build_projection_inputs(
             deadline, ignoring any current-season results from it onward. Defaults to the first
             requested gameweek, which is the right answer for a live plan and the honest one for
             re-scoring a played gameweek.
+        historical: The season is a completed one being replayed for the projection panel. The
+            player pool, clubs and prices are taken as of the deadline rather than from the
+            season-end reference table, and the two live-only corrections — the recalibration
+            layer and the new-signing widening — are skipped, since neither has the data it
+            reads (price snapshots, a live player table) for a past season.
 
     Returns:
         The player-match frame and its aligned ``(n_rows, 3)`` minutes probabilities.
     """
     season = models.season
-    players = current_players(con, season)
+    before = as_of_gameweek if as_of_gameweek is not None else min(gameweeks)
+    players = current_players(con, season, as_of_gameweek=before if historical else None)
     fixtures = teams_module.fixture_rates(con, models.strength, season)
 
-    before = as_of_gameweek if as_of_gameweek is not None else min(gameweeks)
     form = player_form(con, season, before_gw=before)
     players = players.merge(form, on="element", how="left")
 
@@ -454,7 +508,7 @@ def build_projection_inputs(
     # Recalibrate on this season's evidence — preseason minutes and ownership — before the lineup
     # constraint, so the constraint is enforced on the corrected probabilities rather than being
     # undone by them. The correction fades as current-season matches accumulate.
-    if models.minutes_adjustment is not None:
+    if models.minutes_adjustment is not None and not historical:
         features = _adjustment_features(con, player_matches, season)
         adjusted = models.minutes_adjustment.apply(
             features, probabilities["p_full"].to_numpy(dtype="float64")
@@ -469,7 +523,10 @@ def build_projection_inputs(
     # New signings since the last recorded gameweek make their club-mates' minutes uncertain in
     # a way no feature can see yet. Widen the affected players toward their club-position mean
     # so the optimiser prices the risk; the lineup constraint below then re-fields the club.
-    arrivals = arrivals_module.detect_arrivals(con, season)
+    # Detection compares each player's current club with the one he last played for, which for
+    # a completed season is the season-end club against every earlier one — so it is skipped
+    # when replaying history, where the as-of player table already carries the right club.
+    arrivals = [] if historical else arrivals_module.detect_arrivals(con, season)
     risk = arrivals_module.disruption(player_matches, arrivals)
     player_matches["minutes_risk"] = risk.to_numpy(dtype="float64")
     probabilities = arrivals_module.widen(probabilities, player_matches, risk)

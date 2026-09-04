@@ -235,6 +235,26 @@ CREATE TABLE IF NOT EXISTS projections (
     ep_p90        DOUBLE,
     PRIMARY KEY (season, gw, element, made_at)
 );
+
+-- The projection panel: what the pipeline would have projected before every deadline of every
+-- completed season, rebuilt leakage-free (see backtest/panel.py). ``projections`` above is the
+-- live record for the season being played; this is its ten-season counterpart, and the price
+-- history that the option values in fplass.options are measured from. Not dropped by drop_all:
+-- it is derived, versioned, and expensive to rebuild.
+CREATE TABLE IF NOT EXISTS projection_panel (
+    season        VARCHAR NOT NULL,
+    as_of_gw      INTEGER NOT NULL,   -- the deadline the projection was made before
+    target_gw     INTEGER NOT NULL,   -- the gameweek projected (as_of_gw .. as_of_gw + horizon)
+    element       INTEGER NOT NULL,
+    p_full        DOUBLE,
+    p_cameo       DOUBLE,
+    n_fixtures    INTEGER,
+    ep_mean       DOUBLE,
+    ep_p10        DOUBLE,
+    ep_p90        DOUBLE,
+    model_version VARCHAR,
+    PRIMARY KEY (season, as_of_gw, target_gw, element)
+);
 """
 
 
