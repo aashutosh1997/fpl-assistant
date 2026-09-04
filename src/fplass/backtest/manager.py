@@ -75,7 +75,8 @@ class PolicyConfig:
     chip_rule: str = "floors"
     chip_gains: str | None = None
     wildcard_candidates: int = 1
-    solver_time_limit: int = 20
+    # A backstop only: the solver stops on the MIP gap, so replays are load-independent.
+    solver_time_limit: int = 90
 
     @classmethod
     def parse(cls, spec: str | None) -> PolicyConfig:

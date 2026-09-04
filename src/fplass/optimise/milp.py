@@ -192,17 +192,26 @@ class Plan:
         return "\n".join(lines)
 
 
-def _best_solver(*, msg: bool, time_limit: int):
+# The solver stops when the incumbent is proven within this fraction of the bound. A clock alone
+# makes the plan depend on how busy the machine is — under a heavy load the same twenty seconds
+# buy half the search — which made replays run in parallel incomparable with ones run alone.
+# On these problems the gap is reached in about the time the old clock allowed, with objectives
+# within a few hundredths, so the clock becomes a backstop rather than the stopping rule.
+DEFAULT_MIP_GAP = 0.005
+
+
+def _best_solver(*, msg: bool, time_limit: int, gap: float = DEFAULT_MIP_GAP):
     """Pick the fastest available solver.
 
     HiGHS (via ``highspy``) is several times quicker than the bundled CBC on a problem this size,
     which matters because the league-aware stage solves this repeatedly to build a plan pool. CBC
-    ships with PuLP, so it is the fallback rather than a hard dependency.
+    ships with PuLP, so it is the fallback rather than a hard dependency. Single-threaded, so
+    that replays running several seasons at once share the machine fairly and deterministically.
     """
     for factory in (
-        lambda: pulp.HiGHS(msg=msg, timeLimit=time_limit),
-        lambda: pulp.HiGHS_CMD(msg=msg, timeLimit=time_limit),
-        lambda: pulp.PULP_CBC_CMD(msg=msg, timeLimit=time_limit),
+        lambda: pulp.HiGHS(msg=msg, timeLimit=time_limit, gapRel=gap, threads=1),
+        lambda: pulp.HiGHS_CMD(msg=msg, timeLimit=time_limit, gapRel=gap, threads=1),
+        lambda: pulp.PULP_CBC_CMD(msg=msg, timeLimit=time_limit, gapRel=gap, threads=1),
     ):
         try:
             solver = factory()
@@ -267,6 +276,7 @@ def solve(
     terminal_value: pd.Series | None = None,
     terminal_bank_value: float = 0.0,
     time_limit: int = 120,
+    mip_gap: float = DEFAULT_MIP_GAP,
     msg: bool = False,
 ) -> Plan:
     """Solve the multi-gameweek plan.
@@ -309,7 +319,9 @@ def solve(
             the horizon, with the share measured by the paper manager.
         terminal_bank_value: Points per 0.1m left in the bank at the end of the horizon, so
             money kept back for a later move is not treated as wasted.
-        time_limit: Solver time limit in seconds.
+        time_limit: Solver time limit in seconds, a backstop behind ``mip_gap``.
+        mip_gap: Relative optimality gap the solver stops at; the stopping rule that makes a
+            plan reproducible whatever else the machine is doing.
 
     Returns:
         The solved :class:`Plan`.
@@ -590,7 +602,7 @@ def solve(
             if in_plan:
                 problem += pulp.lpSum(in_plan) <= len(in_plan) - 1
 
-    problem.solve(_best_solver(msg=msg, time_limit=time_limit))
+    problem.solve(_best_solver(msg=msg, time_limit=time_limit, gap=mip_gap))
 
     status = pulp.LpStatus[problem.status]
     if status not in {"Optimal", "Not Solved"}:
