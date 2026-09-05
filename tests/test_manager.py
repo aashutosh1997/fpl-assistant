@@ -201,7 +201,10 @@ def test_policy_config_parses_and_splits_the_horizon():
     assert config.bench_weight == 0.3 and config.terminal_beta == 0.5 and config.horizon == 2
     assert config.chip_floors["3xc"] == 8.0 and config.chip_floors["bboost"] == 12.0
     assert "terminal_beta=0.5" in config.tag() and "3xc8" in config.tag()
-    assert manager.PolicyConfig.parse(None).tag() == "default"
+    # The chip rule is always named when it is the continuation rule, default or not, so a
+    # run's files never get confused with the flat-floor baseline's.
+    assert manager.PolicyConfig.parse(None).tag() == "chips=continuation"
+    assert manager.PolicyConfig.parse("chip_rule=floors").tag() == "default"
 
     expected = pd.DataFrame({gw: [float(gw)] * 2 for gw in range(5, 12)}, index=[1, 2])
     inside, terminal = manager.split_horizon(expected, config)

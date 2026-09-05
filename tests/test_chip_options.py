@@ -98,3 +98,21 @@ def test_roadmap_accepts_a_threshold_function(con):
                                    state, plan, windows, "2026-27", min_gain=lambda chip, gw: 0.0,
                                    wildcard_candidates=0)
     assert "3xc" in always.schedule.values()
+
+
+def test_the_default_policy_reads_the_measured_thresholds(con):
+    from fplass.optimise import chips as roadmap
+    from fplass.optimise.policy import PolicyConfig
+
+    windows = milp.ChipWindows.from_warehouse(con, "2026-27")
+    config = PolicyConfig()
+    assert config.chip_rule == "continuation"
+    floor = config.thresholds(windows, "2026-27")
+    assert callable(floor)
+    assert floor("3xc", 38) == 0.0, "the last week of the window plays the chip for any gain"
+    assert floor("3xc", 21) > roadmap.DEFAULT_MIN_GAIN["3xc"], "early in the second half it waits"
+    assert floor("wildcard", 5) == roadmap.DEFAULT_MIN_GAIN["wildcard"], "the wildcard keeps its floor"
+    assert "chips=continuation" in config.tag()
+
+    missing = PolicyConfig.parse("chip_gains=/nowhere/gains.csv")
+    assert missing.thresholds(windows, "2026-27") is None, "no file: flat floors"

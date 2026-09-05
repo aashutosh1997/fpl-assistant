@@ -21,8 +21,12 @@ CONFIG = ROOT / "config"
 PANEL = DATA / "panel"
 # Paper-manager traces and summaries, one CSV per policy and season.
 BACKTEST = DATA / "backtest"
+# Measured tables the live planner reads, committed with the code: the chip gains per week of
+# the replayed seasons that the continuation-rule thresholds are fitted from.
+MEASURED = DATA / "measured"
+MEASURED_CHIP_GAINS = MEASURED / "chip_gains.csv"
 
 
 def ensure_dirs() -> None:
-    for d in (DATA, SNAPSHOTS, PRICE_SNAPSHOTS, RAW, WAREHOUSE, CACHE, CONFIG, PANEL, BACKTEST):
+    for d in (DATA, SNAPSHOTS, PRICE_SNAPSHOTS, RAW, WAREHOUSE, CACHE, CONFIG, PANEL, BACKTEST, MEASURED):
         d.mkdir(parents=True, exist_ok=True)
