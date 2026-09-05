@@ -658,6 +658,27 @@ def replay_season(
     return replay
 
 
+
+# Thread limits for worker processes. DuckDB and the BLAS behind numpy each open a pool the size
+# of the machine by default, so eight workers became well over a hundred runnable threads and
+# a replay that should take an hour took a night. Set before the pool spawns; spawned children
+# inherit the environment.
+WORKER_THREAD_ENV = {
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "VECLIB_MAXIMUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+}
+
+
+def _single_threaded_environment() -> None:
+    import os
+
+    for key, value in WORKER_THREAD_ENV.items():
+        os.environ.setdefault(key, value)
+
+
 def _replay_task(args: tuple) -> dict[str, object]:
     season, policy, config, max_gameweek, out_dir, version = args
     logging.basicConfig(
@@ -666,6 +687,7 @@ def _replay_task(args: tuple) -> dict[str, object]:
     logging.getLogger("fplass").setLevel(logging.WARNING)
     log.setLevel(logging.INFO)
     con = connect(read_only=True)
+    con.execute("SET threads TO 1")
     try:
         replay = replay_season(
             con,
@@ -768,6 +790,7 @@ def replay_seasons(
     process must not hold the warehouse open read-write while this runs.
     """
     config = config or PolicyConfig()
+    _single_threaded_environment()
     tasks = [(s, policy, config, max_gameweek, str(out_dir), panel_version) for s in seasons]
     if workers <= 1 or len(tasks) == 1:
         rows = [_replay_task(t) for t in tasks]

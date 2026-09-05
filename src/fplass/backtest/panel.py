@@ -259,6 +259,7 @@ def build_season(
     Opens its own read-only connection, so it can run in a worker process alongside others.
     """
     con = connect(read_only=True)
+    con.execute("SET threads TO 1")
     try:
         context = season_context(con, season)
         chosen = [g for g in context.gameweeks if gameweeks is None or g in gameweeks]
@@ -290,6 +291,27 @@ def build_season(
         con.close()
 
 
+
+# Thread limits for worker processes. DuckDB and the BLAS behind numpy each open a pool the size
+# of the machine by default, so eight workers became well over a hundred runnable threads and
+# a replay that should take an hour took a night. Set before the pool spawns; spawned children
+# inherit the environment.
+WORKER_THREAD_ENV = {
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "VECLIB_MAXIMUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+}
+
+
+def _single_threaded_environment() -> None:
+    import os
+
+    for key, value in WORKER_THREAD_ENV.items():
+        os.environ.setdefault(key, value)
+
+
 def _build_season_task(args: tuple) -> str:
     season, horizon, n_draws, gameweeks, out_dir = args
     logging.basicConfig(
@@ -317,6 +339,7 @@ def build_panel(
 
     The calling process must not hold the warehouse open read-write while this runs.
     """
+    _single_threaded_environment()
     tasks = [(s, horizon, n_draws, gameweeks, str(out_dir)) for s in seasons]
     if workers <= 1 or len(tasks) == 1:
         return [Path(_build_season_task(t)) for t in tasks]
