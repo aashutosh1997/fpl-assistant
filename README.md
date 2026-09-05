@@ -182,14 +182,18 @@ the nine seasons, paired season by season against the flat-floor baseline above 
 |---|---|---|---|---|---|
 | Banked transfer worth 2.0 | 2,234 | +31 (SE 28) | 5 of 9 | 3 | adopted: the same points with 22 fewer hits |
 | Continuation-rule chips | 2,246 | +43 (SE 21) | 7 of 9 | 24 | adopted: the floors left chips unplayed |
-| Terminal value 0.5 | 2,230 | +26 (SE 25) | 6 of 9 | 23 | see below |
+| Terminal value 0.5 | 2,230 | +26 (SE 25) | 6 of 9 | 23 | not adopted: see the last row |
 | Bench place 0.20 (on continuation) | 2,242 | −4 vs 2,246 (SE 23) | 4 of 9 | 25 | measured, not adopted |
-| Banked 2.0 + continuation | 2,262 | +59 (SE 24) | 7 of 9 | 3 | the new default |
+| Banked 2.0 + continuation | 2,262 | +59 (SE 24) | 7 of 9 | 3 | **the new default** |
+| Banked 2.0 + continuation + terminal 0.5 | 2,214 | −48 vs the default (SE 24) | 3 of 9 | 4 | not adopted |
 
 The noise floor is 55 points; only the combination clears it outright, but every piece of it
 is positive on its own and the hits fall from 25 a season to 3. A manager who scores the same
 with a fifth of the hits is a better manager, and a plan that stops recommending them is easier
-to follow.
+to follow. The terminal value helped alone and hurt on top of the new default (three seasons
+of nine up), so the horizon keeps its cliff for now; with a banked transfer priced properly the
+two-, four-, six- and ten-week plans for the live squad already agree on the first move, which
+was the symptom it was meant to cure.
 
 ### The order book
 
