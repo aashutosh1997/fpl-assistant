@@ -176,8 +176,20 @@ for the week:
 | Chip timing | flat floors | **the continuation rule**: play a chip when its gain beats the expected best later gain for the weeks left, and at the window's end for whatever it is worth. Replayed, +43 points a season over the floors (seven seasons of nine up), because the floors left Bench Boosts and Free Hits unplayed |
 
 Which of those replace the live constants is decided the same way — the variant replayed over
-the nine seasons, paired season by season against the baseline above. The continuation rule is
-now the default; the rest are recorded below as they are judged.
+the nine seasons, paired season by season against the flat-floor baseline above (2,203):
+
+| Variant | Points a season | vs baseline | Seasons up | Hits a season | Verdict |
+|---|---|---|---|---|---|
+| Banked transfer worth 2.0 | 2,234 | +31 (SE 28) | 5 of 9 | 3 | adopted: the same points with 22 fewer hits |
+| Continuation-rule chips | 2,246 | +43 (SE 21) | 7 of 9 | 24 | adopted: the floors left chips unplayed |
+| Terminal value 0.5 | 2,230 | +26 (SE 25) | 6 of 9 | 23 | see below |
+| Bench place 0.20 (on continuation) | 2,242 | −4 vs 2,246 (SE 23) | 4 of 9 | 25 | measured, not adopted |
+| Banked 2.0 + continuation | 2,262 | +59 (SE 24) | 7 of 9 | 3 | the new default |
+
+The noise floor is 55 points; only the combination clears it outright, but every piece of it
+is positive on its own and the hits fall from 25 a season to 3. A manager who scores the same
+with a fifth of the hits is a better manager, and a plan that stops recommending them is easier
+to follow.
 
 ### The order book
 

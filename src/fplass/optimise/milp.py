@@ -55,8 +55,19 @@ SELL_ON_FEE = 0.5
 # The planner's economy, in one place. Both the live advisor and the ten-season replay read
 # these through fplass.optimise.policy.PolicyConfig, so a value changes for both at once, and
 # the replay is where a change earns its place (see README, "What the replay measured").
+#
+# Bench: substitutes delivered 18% of what the plan expected of the bench across nine replayed
+# seasons, but valuing the bench at that share scored no more (-4 points a season, noise), so
+# the weight stays where it was: what a bench place is worth to the *plan* is not the same as
+# what the bench delivers.
 DEFAULT_BENCH_WEIGHT = 0.12
-DEFAULT_BANKED_TRANSFER_VALUE = 0.25
+# A banked transfer: the second-best swap at the next deadline is worth 8.7 projected points on
+# average over the replayed weeks, so the hit an extra free transfer saves is nearly the full
+# four (3.5 measured). Priced at two — the projected gains that measure it are the same ones
+# that bought the baseline's 25 hits a season, and half of them did not materialise — the replay
+# scores 31 points a season more alone and 59 more with the continuation chip rule, with hits
+# falling from 25 a season to 3. The old 0.25 was a tie-breaker, not a value.
+DEFAULT_BANKED_TRANSFER_VALUE = 2.0
 
 CHIPS = ("wildcard", "freehit", "bboost", "3xc")
 
