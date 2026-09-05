@@ -103,10 +103,14 @@ def plan_command(
         "league", help="league | points | blend — what to optimise for."
     ),
     solver_seconds: int = typer.Option(120, help="Per-solve time limit."),
+    config: str = typer.Option(
+        None, help="Planner knobs to override, e.g. 'banked_transfer_value=2.0,chip_rule=continuation'."
+    ),
 ) -> None:
     """Recommend this week's transfers, captain and chip strategy."""
     from .advise import advise, format_report
     from .ingest.warehouse import connect
+    from .optimise.policy import PolicyConfig
 
     con = connect()
     try:
@@ -119,6 +123,7 @@ def plan_command(
             n_draws=draws,
             objective=objective,
             solver_time_limit=solver_seconds,
+            config=PolicyConfig.parse(config),
         )
         typer.echo(format_report(recommendation))
     finally:

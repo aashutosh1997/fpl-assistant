@@ -34,6 +34,7 @@ from .options import value as value_module
 from .optimise import chips as chips_module
 from .optimise import league as league_module
 from .optimise import milp
+from .optimise.policy import PolicyConfig, split_horizon
 from .prices import calibrate as calibrate_module
 from .prices import decide as decide_module
 from .sim import project
@@ -186,9 +187,19 @@ def advise(
     models: project.ProjectionModels | None = None,
     price_snapshots: pd.DataFrame | None = None,
     solver_time_limit: int = 120,
+    config: PolicyConfig | None = None,
 ) -> Recommendation:
-    """Produce a full weekly recommendation. See the module docstring for the stages."""
+    """Produce a full weekly recommendation. See the module docstring for the stages.
+
+    Args:
+        config: The planner's knobs — bench weight, banked transfer value, terminal value, chip
+            rule. Defaults to the values the ten-season replay has earned; the same object the
+            replay runs, so what is measured is what is played.
+    """
     notes: list[str] = []
+    config = config or PolicyConfig()
+    if config.horizon != horizon:
+        config = PolicyConfig(**{**{f: getattr(config, f) for f in config.__slots__}, "horizon": horizon})
 
     with FPLClient() as client:
         players = project.live_player_table(con, client=client, season=season)
@@ -215,7 +226,7 @@ def advise(
         con,
         models=models,
         start_gameweek=target_gameweek,
-        horizon=horizon,
+        horizon=config.projection_horizon(),
         n_draws=n_draws,
         availability=availability,
         # Recorded before the deadline so `fpl calibrate` can score it afterwards. This is the
@@ -224,7 +235,12 @@ def advise(
         flow=flow,
         flow_max_shift=LIVE_FLOW_MAX_SHIFT,
     )
-    expected_points = result.expected_points
+    # The planning horizon, and the terminal value read from the weeks projected beyond it.
+    expected_points, terminal = split_horizon(result.expected_points, config)
+    options = {**config.solve_options(), "terminal_value": terminal}
+    horizon_slots = [int(np.where(result.gameweeks == g)[0][0]) for g in expected_points.columns]
+    samples = result.points[:, :, horizon_slots]
+    gameweeks = np.array(list(expected_points.columns))
 
     windows = milp.ChipWindows.from_warehouse(con, season)
 
@@ -236,17 +252,20 @@ def advise(
         windows,
         allow_chips=False,
         time_limit=solver_time_limit,
+        **options,
     )
     roadmap = chips_module.build_roadmap(
         con,
-        result.points,
+        samples,
         result.elements,
-        result.gameweeks,
+        gameweeks,
         players,
         squad,
         baseline,
         windows,
         season,
+        min_gain=config.thresholds(windows, season),
+        solve_options=options,
     )
     notes.extend(roadmap.notes)
 
@@ -262,6 +281,7 @@ def advise(
             chip_schedule=roadmap.schedule,
             forbidden=forbidden,
             time_limit=solver_time_limit,
+            **options,
         )
         if plan.status not in {"Optimal", "Not Solved"}:
             break
@@ -274,14 +294,12 @@ def advise(
     if league_state is not None and league_state.rivals:
         ownership = players.set_index("element")["selected_by_percent"].fillna(0.0)
         rival_totals = league_module.simulate_rivals(
-            league_state, result.points, result.elements, players, ownership
+            league_state, samples, result.elements, players, ownership
         )
         chosen, comparison = league_module.choose(
-            plans, league_state, rival_totals, result.points, result.elements, objective=objective
+            plans, league_state, rival_totals, samples, result.elements, objective=objective
         )
-        metrics = league_module.evaluate(
-            chosen, league_state, rival_totals, result.points, result.elements
-        )
+        metrics = league_module.evaluate(chosen, league_state, rival_totals, samples, result.elements)
         notes.append(_league_note(league_state, metrics))
     else:
         chosen = plans[0]
@@ -308,6 +326,7 @@ def advise(
         price_snapshots,
         notes,
         solver_time_limit,
+        options,
     )
 
     notes.extend(_minutes_risk_notes(chosen, player_matches, players, target_gameweek))
@@ -488,8 +507,10 @@ def _price_stage(
     price_snapshots,
     notes,
     solver_time_limit,
+    options=None,
 ):
     """Fit or fall back on a price model, then time the recommended transfers."""
+    options = options or {}
     from .paths import PRICE_SNAPSHOTS
 
     snapshot = players.copy()
@@ -566,6 +587,7 @@ def _price_stage(
             windows,
             allow_chips=False,
             time_limit=solver_time_limit,
+            **options,
         ).objective
 
     try:

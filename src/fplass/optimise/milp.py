@@ -52,6 +52,12 @@ HIT_COST = 4.0
 MAX_BANKED_TRANSFERS = 5
 SELL_ON_FEE = 0.5
 
+# The planner's economy, in one place. Both the live advisor and the ten-season replay read
+# these through fplass.optimise.policy.PolicyConfig, so a value changes for both at once, and
+# the replay is where a change earns its place (see README, "What the replay measured").
+DEFAULT_BENCH_WEIGHT = 0.12
+DEFAULT_BANKED_TRANSFER_VALUE = 0.25
+
 CHIPS = ("wildcard", "freehit", "bboost", "3xc")
 
 
@@ -267,8 +273,8 @@ def solve(
     chip_windows: ChipWindows,
     *,
     gameweeks: list[int] | None = None,
-    bench_weight: float = 0.12,
-    banked_transfer_value: float = 0.25,
+    bench_weight: float = DEFAULT_BENCH_WEIGHT,
+    banked_transfer_value: float = DEFAULT_BANKED_TRANSFER_VALUE,
     allow_chips: bool = True,
     chip_schedule: dict[int, str] | None = None,
     forbidden: list[dict] | None = None,
