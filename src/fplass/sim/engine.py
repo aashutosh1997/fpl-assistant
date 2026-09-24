@@ -65,6 +65,9 @@ class SimulationResult:
     gameweeks: np.ndarray  # gameweek per depth slice
     minutes_played: np.ndarray  # (n_draws, n_players, n_gameweeks) int16
     n_draws: int
+    # Mean points per scoring component for each player-match row, in the order of the frame
+    # that was simulated. Only kept when asked for: it is a diagnostic, not a planning input.
+    components: pd.DataFrame | None = None
 
     @property
     def expected_points(self) -> pd.DataFrame:
@@ -240,6 +243,7 @@ def simulate(
     chunk_size: int = 2_000,
     minutes_profile: MinutesProfile | None = None,
     team_returns: TeamReturns | None = None,
+    components: bool = False,
 ) -> SimulationResult:
     """Run the simulation and return joint point samples.
 
@@ -261,6 +265,8 @@ def simulate(
             defenders off early and credits them clean sheets for goals conceded after they left.
         team_returns: How the scoreline becomes goals, assists and saves, measured. Without it
             every team goal is credited, 65% are assisted and saves follow ``0.6 + 0.4 * conceded``.
+        components: Also return each row's mean points per scoring component (goals, assists,
+            clean sheets and so on), for checking the engine against history piece by piece.
 
     Returns:
         A :class:`SimulationResult`.
@@ -304,6 +310,8 @@ def simulate(
 
     points = np.zeros((n_draws, len(elements), len(gameweeks)), dtype="int16")
     minutes_out = np.zeros((n_draws, len(elements), len(gameweeks)), dtype="int16")
+    component_sums: np.ndarray | None = None
+    component_names: list[str] = []
 
     rng = np.random.default_rng(seed)
     fixture_match_ids = frame["fixture_id"].to_numpy()
@@ -413,8 +421,14 @@ def simulate(
 
         from ..scoring import points_from_events  # local import avoids a cycle at module load
 
-        totals = points_from_events(events, rules)["total"].to_numpy(dtype="float64")
+        scored = points_from_events(events, rules)
+        totals = scored["total"].to_numpy(dtype="float64")
         chunk_points = np.rint(totals).astype("int16").reshape(size, n_rows)
+        if components:
+            parts = scored.drop(columns="total")
+            chunk_sums = parts.to_numpy(dtype="float64").reshape(size, n_rows, -1).sum(axis=0)
+            component_sums = chunk_sums if component_sums is None else component_sums + chunk_sums
+            component_names = list(parts.columns)
 
         # Accumulate into (draw, player, gameweek); += handles double gameweeks, where a player
         # legitimately contributes twice to the same slot.
@@ -438,6 +452,11 @@ def simulate(
         gameweeks=gameweeks,
         minutes_played=minutes_out,
         n_draws=n_draws,
+        components=(
+            pd.DataFrame(component_sums / n_draws, columns=component_names)
+            if component_sums is not None
+            else None
+        ),
     )
 
 

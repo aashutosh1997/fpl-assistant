@@ -438,13 +438,61 @@ def _solve_tilt(probabilities: np.ndarray, target: float, iterations: int = 80) 
 # of his team's goals by the same seven percent.
 FULL_APPEARANCES_PER_TEAM = 10.3
 
+# A bench of three was the rule until 2022. The target the simulator actually uses is measured per
+# season by :func:`measure_lineup`; this stands only when there is nothing to measure.
+SUBSTITUTE_APPEARANCES_PER_TEAM = 3.0
+
+
+@dataclass(slots=True)
+class LineupTargets:
+    """How many sixty-minute and shorter appearances a team makes per match, measured.
+
+    The five-substitute rule moved cameos (1-59 minutes) from 3.2-3.5 a team-match in 2016-22
+    to 4.6-4.9 in 2022-26. Calibrating to a hand-set three left the simulator a third of its
+    cameos short in every recent season (34 simulated against 53 actual for midfielders a
+    gameweek), and with them the appearance points and the minutes that earn substitutes a share
+    of their team's goals.
+    """
+
+    full: float
+    cameo: float
+    seasons: tuple[str, ...] = ()
+
+
+def measure_lineup(con, seasons: list[str]) -> LineupTargets | None:
+    """Sixty-minute and cameo appearances per team-match in the given seasons, or None."""
+    team_matches, full, cameo = con.execute(
+        """
+        WITH played AS (
+            SELECT count(*) * 2 AS team_matches
+            FROM fixtures
+            WHERE list_contains(?, season) AND finished AND team_h_score IS NOT NULL
+        ), appearances AS (
+            SELECT sum((minutes >= 60)::INT) AS full_apps,
+                   sum((minutes BETWEEN 1 AND 59)::INT) AS cameos
+            FROM player_gw
+            WHERE list_contains(?, season) AND position <> 'AM'
+        )
+        SELECT played.team_matches, appearances.full_apps, appearances.cameos
+        FROM played, appearances
+        """,
+        [list(seasons), list(seasons)],
+    ).fetchone()
+    if not team_matches or full is None or cameo is None:
+        return None
+    return LineupTargets(
+        full=float(full) / float(team_matches),
+        cameo=float(cameo) / float(team_matches),
+        seasons=tuple(seasons),
+    )
+
 
 def calibrate_to_lineup(
     probabilities: pd.DataFrame,
     team_match: pd.Series,
     *,
     starters: float = FULL_APPEARANCES_PER_TEAM,
-    substitutes: float = 3.0,
+    substitutes: float = SUBSTITUTE_APPEARANCES_PER_TEAM,
 ) -> pd.DataFrame:
     """Rescale minutes probabilities so each team fields a legal number of players.
 

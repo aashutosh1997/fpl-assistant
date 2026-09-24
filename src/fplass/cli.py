@@ -331,6 +331,42 @@ def backtest_panel(
     typer.echo(f"loaded {loaded:,} panel rows from {len(paths)} season(s)")
 
 
+@backtest_app.command("components")
+def backtest_components(
+    seasons: str = typer.Option("all", help="Comma-separated seasons, or 'all' completed ones."),
+    every: int = typer.Option(4, help="Replay every n-th deadline of each season."),
+    draws: int = typer.Option(2000, help="Monte Carlo draws per deadline."),
+    workers: int = typer.Option(1, help="Seasons replayed in parallel processes."),
+) -> None:
+    """The engine against history, scoring component by component and position by position.
+
+    Totals hide offsetting errors; this is the check that finds them. Writes the player rows
+    to data/backtest/components_<model version>.csv and prints the comparison.
+    """
+    from .backtest import components as components_module
+    from .backtest import panel as panel_module
+    from .ingest.warehouse import connect
+    from .paths import BACKTEST
+    from .sim.project import MODEL_VERSION
+
+    con = connect(read_only=True)
+    try:
+        chosen = (
+            panel_module.panel_seasons(con)
+            if seasons == "all"
+            else [s.strip() for s in seasons.split(",")]
+        )
+    finally:
+        con.close()
+
+    frame = components_module.measure(chosen, every=every, n_draws=draws, workers=workers)
+    BACKTEST.mkdir(parents=True, exist_ok=True)
+    path = BACKTEST / f"components_{MODEL_VERSION}.csv"
+    frame.to_csv(path, index=False)
+    typer.echo(components_module.report(frame))
+    typer.echo(f"rows: {path}")
+
+
 @backtest_app.command("score")
 def backtest_score(
     seasons: str = typer.Option("all", help="Comma-separated seasons, or 'all'."),

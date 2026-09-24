@@ -102,3 +102,45 @@ def test_veteran_defcon_rate_is_not_diluted_by_seasons_without_the_stat(con, rat
     assert abs(modelled / actual[code[0]] - 1) < 0.15, (
         f"Virgil modelled {modelled:.2f}/90 vs 2025-26 actual {actual[code[0]]:.2f}/90"
     )
+
+
+def _one_forward(**overrides) -> pd.DataFrame:
+    row = {
+        "code": 1, "position": "FWD", "price_tier": "premium", "minutes": 9000.0,
+        "raw_minutes": 9000.0, "thin_sample": False, "goals_scored": 50.0, "assists": 30.0,
+        "defcon_count": 0.0, "saves": 0.0, "yellow_cards": 0.0, "bonus": 0.0,
+        "expected_goals": 40.0, "expected_assists": 10.0, "expected_goals_conceded": 0.0,
+    }
+    row.update(overrides)
+    return pd.DataFrame([row])
+
+
+FLAT = rates.RatePriors(
+    fallback={r: (1e-6, 1e-6) for r in (*rates.COUNT_RATES, *rates.EXPECTED_RATES)}
+)
+
+
+def test_goal_and_assist_rates_blend_expected_stats_by_their_own_weights():
+    """A hundred nineties and a negligible prior: each rate is its own count per 90."""
+    out = rates.shrink(_one_forward(), FLAT).iloc[0]
+    g, a = rates.XG_GOAL_WEIGHT, rates.XA_ASSIST_WEIGHT
+    assert out["goal_rate"] == pytest.approx(g * 0.40 + (1 - g) * 0.50, rel=1e-4)
+    assert out["assist_rate"] == pytest.approx(a * 0.10 + (1 - a) * 0.30, rel=1e-4)
+
+
+def test_expected_stats_are_converted_into_fpl_units_by_position_before_blending():
+    """Forwards earn about two FPL assists per unit of xA; the blend must see that, not raw xA."""
+    conversion = {"xg": {"FWD": 1.0}, "xa": {"FWD": 2.0}}
+    out = rates.shrink(_one_forward(), FLAT, conversion=conversion).iloc[0]
+    a = rates.XA_ASSIST_WEIGHT
+    assert out["assist_rate"] == pytest.approx(a * 0.20 + (1 - a) * 0.30, rel=1e-4)
+
+
+def test_expected_stats_before_fpl_published_them_are_not_zeros(con):
+    """2022-23 stored 0.0 for gameweeks 1-15; read as data, midfielders beat their xG by half."""
+    conversion = rates.measure_expected_conversion(con, "2022-23")
+    if conversion is None:
+        pytest.skip("2022-23 not in the warehouse")
+    assert 0.85 < conversion["xg"]["MID"] < 1.15
+    assert conversion["xa"]["FWD"] > 1.7
+    assert conversion["xg"]["DEF"] < 1.0

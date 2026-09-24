@@ -136,3 +136,33 @@ def test_the_measured_team_returns_match_the_game(con, complete_seasons):
     # Saves barely move with goals conceded; the response averages one at the league's mean.
     assert 0.0 <= returns.save_slope < 0.4 < 2.0 < returns.save_intercept
     assert abs(float(returns.save_response(np.array([returns.mean_conceded]))[0]) - 1.0) < 1e-9
+
+
+def test_components_add_up_to_the_expected_points():
+    rules = _rules(
+        goals_conceded={"GKP": -1.0, "DEF": -1.0, "MID": 0.0, "FWD": 0.0},
+        clean_sheets={"GKP": 4.0, "DEF": 4.0, "MID": 1.0, "FWD": 0.0},
+        assists=dict.fromkeys(POSITIONS, 3.0),
+    )
+    n = 3
+    frame = pd.DataFrame({
+        "element": np.arange(1, n + 1), "event": 1, "fixture_id": 1, "is_home": True,
+        "position": "DEF", "goal_rate": 0.1, "assist_rate": 0.2, "defcon_rate": 0.0,
+        "save_rate": 0.0, "card_rate": 0.0, "xg_home": 1.2, "xg_away": LAM_AWAY,
+    })
+    result = simulate(frame, np.array([[0.1, 0.2, 0.7]] * n), rules, BPSModel(), rho=0.0,
+                      n_draws=4000, seed=3, components=True)
+    assert result.components is not None and len(result.components) == n
+    expected = result.points.mean(axis=0)[:, 0]
+    assert np.allclose(result.components.sum(axis=1).to_numpy(), expected)
+
+
+def test_lineup_targets_follow_the_substitution_rule(con, complete_seasons):
+    """Cameos per team-match rose from about 3.3 to 4.8 when five substitutes arrived in 2022."""
+    from fplass.features.minutes import measure_lineup
+
+    recent = measure_lineup(con, [complete_seasons[-1]])
+    assert 10.0 < recent.full < 10.7
+    assert recent.cameo > 4.2
+    if "2018-19" in complete_seasons:
+        assert measure_lineup(con, ["2018-19"]).cameo < 3.7

@@ -140,14 +140,26 @@ def player_totals(
         filters.append("(p.season < ? OR (p.season = ? AND p.gw_seq < ?))")
         params += [up_to_season, up_to_season, up_to_gw_seq or 1]
 
+    # FPL began publishing expected stats in gameweek 16 of 2022-23 and stored 0.0, not null, for
+    # the fifteen gameweeks before, which read as a season-long drought of chances for everyone
+    # who played then. A gameweek whose league-wide expected goals sum to nothing published none.
     frame = con.execute(
         f"""
+        WITH published AS (
+            SELECT season, gw, sum(expected_goals) > 0 AS has_expected
+            FROM player_gw
+            GROUP BY season, gw
+        )
         SELECT
             pl.code, p.season, p.gw_seq, p.position, p.minutes, p.prev_value,
             p.goals_scored, p.assists, p.defcon_count, p.saves, p.yellow_cards, p.bonus,
-            p.expected_goals, p.expected_assists, p.expected_goals_conceded
+            CASE WHEN pub.has_expected THEN p.expected_goals END AS expected_goals,
+            CASE WHEN pub.has_expected THEN p.expected_assists END AS expected_assists,
+            CASE WHEN pub.has_expected THEN p.expected_goals_conceded END
+                AS expected_goals_conceded
         FROM player_gw_as_of p
         JOIN players pl ON pl.season = p.season AND pl.element = p.element
+        LEFT JOIN published pub ON pub.season = p.season AND pub.gw = p.gw
         WHERE {" AND ".join(filters)} AND pl.code IS NOT NULL
         """,
         params,
@@ -273,14 +285,65 @@ def fit_priors(totals: pd.DataFrame, *, min_group: int = 15) -> RatePriors:
     return RatePriors(priors=priors, fallback=fallback)
 
 
-def shrink(totals: pd.DataFrame, priors: RatePriors, *, xg_weight: float = 0.75) -> pd.DataFrame:
+def measure_expected_conversion(con, season: str) -> dict[str, dict[str, float]] | None:
+    """FPL goals per unit of xG and FPL assists per unit of xA, by position, in one season.
+
+    Opta's expected stats and FPL's counts are on different scales, and differently by position:
+    in 2023-26 defenders scored 0.76-0.93 FPL goals per unit of xG (set-piece headers under-convert)
+    while midfielders and forwards scored one for one, and forwards earned 2.1 FPL assists per
+    unit of xA (rebounds, penalties won) against 1.1-1.4 for everyone else. Blending the raw
+    stats into FPL rates handed defenders goals and took assists from forwards. Returns None for
+    a season that published no expected stats.
+    """
+    rows = con.execute(
+        """
+        WITH published AS (
+            SELECT season, gw FROM player_gw GROUP BY season, gw HAVING sum(expected_goals) > 0
+        )
+        SELECT p.position, sum(p.goals_scored), sum(p.expected_goals),
+               sum(p.assists), sum(p.expected_assists)
+        FROM player_gw p JOIN published USING (season, gw)
+        WHERE p.season = ? AND p.minutes > 0 AND p.position NOT IN ('AM', 'GK', 'GKP')
+        GROUP BY p.position
+        """,
+        [season],
+    ).fetchall()
+    conversion: dict[str, dict[str, float]] = {"xg": {}, "xa": {}}
+    for position, goals, xg, assists, xa in rows:
+        if xg and xg > 0:
+            conversion["xg"][str(position)] = float(goals) / float(xg)
+        if xa and xa > 0:
+            conversion["xa"][str(position)] = float(assists) / float(xa)
+    return conversion if conversion["xg"] or conversion["xa"] else None
+
+
+# How much of a goal or assist rate comes from the expected stats (converted into FPL's units by
+# :func:`measure_expected_conversion`) rather than FPL's own counts. Chosen by out-of-sample Poisson
+# deviance of the next six gameweeks' FPL goals and assists over 2023-26, the seasons with at least
+# a year of expected stats behind them. Once converted, both blends are calibrated by position at
+# any weight, so the weight only decides how much the steadier expected stats are trusted.
+XG_GOAL_WEIGHT = 0.8
+XA_ASSIST_WEIGHT = 0.6
+
+
+def shrink(
+    totals: pd.DataFrame,
+    priors: RatePriors,
+    *,
+    xg_weight: float = XG_GOAL_WEIGHT,
+    xa_weight: float = XA_ASSIST_WEIGHT,
+    conversion: dict[str, dict[str, float]] | None = None,
+) -> pd.DataFrame:
     """Apply the priors, returning one shrunk per-90 rate per player.
 
     Args:
-        xg_weight: How much of the goal and assist rate comes from expected goals rather than
-            actual ones, where xG is available. Weighted toward xG because shot volume and quality
-            persist while finishing largely does not, but not entirely, so that a genuinely
-            elite finisher is not flattened to average.
+        xg_weight: How much of the goal rate comes from expected goals rather than actual ones,
+            where xG is available. Shot volume and quality persist while finishing largely does
+            not, so expected goals carry most of it.
+        xa_weight: The same for assists.
+        conversion: FPL goals per unit of xG and assists per unit of xA by position, from
+            :func:`measure_expected_conversion`, applied before blending so that both halves of
+            each blend are in FPL's units. None blends the raw stats.
     """
     out = totals[["code", "position", "price_tier", "minutes", "raw_minutes", "thin_sample"]].copy()
 
@@ -301,6 +364,11 @@ def shrink(totals: pd.DataFrame, priors: RatePriors, *, xg_weight: float = 0.75)
         observed_nineties = np.where(np.isnan(events), 0.0, observed_nineties)
         out[rate] = (alpha + observed_events) / (beta + observed_nineties)
 
+    if conversion:
+        positions = totals["position"].astype(str)
+        out["xg"] = out["xg"] * positions.map(conversion.get("xg", {})).fillna(1.0).to_numpy()
+        out["xa"] = out["xa"] * positions.map(conversion.get("xa", {})).fillna(1.0).to_numpy()
+
     # Blend expected and actual for the two rates where both exist. Where xG was never published
     # for a player, the prior-driven xg estimate carries no information about him specifically, so
     # lean on the goal rate instead.
@@ -308,9 +376,10 @@ def shrink(totals: pd.DataFrame, priors: RatePriors, *, xg_weight: float = 0.75)
         pd.to_numeric(totals["expected_goals"], errors="coerce").notna()
         & (_exposure(totals, "expected_goals") > 0)
     ).to_numpy()
-    weight = np.where(has_xg, xg_weight, 0.0)
-    out["goal_rate"] = weight * out["xg"] + (1 - weight) * out["goals"]
-    out["assist_rate"] = weight * out["xa"] + (1 - weight) * out["assists"]
+    goal_weight = np.where(has_xg, xg_weight, 0.0)
+    assist_weight = np.where(has_xg, xa_weight, 0.0)
+    out["goal_rate"] = goal_weight * out["xg"] + (1 - goal_weight) * out["goals"]
+    out["assist_rate"] = assist_weight * out["xa"] + (1 - assist_weight) * out["assists"]
 
     out["defcon_rate"] = out["defcon"]
     out["save_rate"] = out["saves"]
@@ -353,7 +422,19 @@ def build(
     if totals.empty:
         raise ValueError("no player history available for the requested cutoff")
     priors = fit_priors(totals)
-    return shrink(totals, priors), priors
+    # The conversion comes from the last completed season before the one being projected.
+    if up_to_season is not None:
+        previous = con.execute(
+            "SELECT max(season) FROM player_gw WHERE season < ?", [up_to_season]
+        ).fetchone()[0]
+    else:
+        row = con.execute(
+            "SELECT season FROM player_gw GROUP BY season "
+            "HAVING count(DISTINCT gw) >= 38 ORDER BY season DESC LIMIT 1"
+        ).fetchone()
+        previous = row[0] if row else None
+    conversion = measure_expected_conversion(con, previous) if previous else None
+    return shrink(totals, priors, conversion=conversion), priors
 
 
 @dataclass(slots=True)

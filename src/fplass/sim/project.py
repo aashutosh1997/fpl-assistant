@@ -68,6 +68,9 @@ class ProjectionModels:
     # How the scoreline becomes goals, assists and saves, measured on the last completed season.
     # None falls back to the engine's constants.
     team_returns: rates_module.TeamReturns | None = None
+    # Sixty-minute and cameo appearances per team-match, measured on the last completed season;
+    # the lineup calibration's targets. None falls back to the hand-set 10.3 and 3.
+    lineup: minutes_module.LineupTargets | None = None
 
 
 def fit_models(
@@ -112,6 +115,7 @@ def fit_models(
         flow=flow_layer,
         minutes_profile=minutes_module.measure_profile(con, [last_completed]),
         team_returns=rates_module.measure_team_returns(con, [last_completed]),
+        lineup=minutes_module.measure_lineup(con, [last_completed]),
     )
 
 
@@ -600,8 +604,13 @@ def build_projection_inputs(
     team_match = (
         player_matches["fixture_id"].astype(str) + ":" + player_matches["team_id"].astype(str)
     )
+    targets = (
+        {"starters": models.lineup.full, "substitutes": models.lineup.cameo}
+        if models.lineup is not None
+        else {}
+    )
     probabilities = minutes_module.calibrate_to_lineup(
-        probabilities.reset_index(drop=True), team_match.reset_index(drop=True)
+        probabilities.reset_index(drop=True), team_match.reset_index(drop=True), **targets
     )
 
     matrix = probabilities[list(minutes_module.CLASS_LABELS)].to_numpy(dtype="float64")
@@ -765,7 +774,7 @@ def project(
     return result, player_matches, models
 
 
-MODEL_VERSION = "2026-27.4"
+MODEL_VERSION = "2026-27.5"
 
 
 def store_projection(

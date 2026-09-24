@@ -64,7 +64,7 @@ from ..sim.engine import SimulationResult, simulate
 
 log = logging.getLogger(__name__)
 
-PANEL_VERSION = "panel.4"
+PANEL_VERSION = "panel.5"
 DEFAULT_DRAWS = 2_000
 DEFAULT_HORIZON = 8
 PANEL_KEY = ("season", "as_of_gw", "target_gw", "element")
@@ -83,6 +83,7 @@ class SeasonContext:
     flow: flow_module.FlowLayer | None = None
     minutes_profile: minutes_module.MinutesProfile | None = None
     team_returns: rates_module.TeamReturns | None = None
+    lineup: minutes_module.LineupTargets | None = None
 
 
 def panel_seasons(con) -> list[str]:
@@ -154,6 +155,7 @@ def season_context(con, season: str) -> SeasonContext:
         # Appearance lengths from the previous season, the same prior the bonus model uses.
         minutes_profile=minutes_module.measure_profile(con, [previous or season]),
         team_returns=rates_module.measure_team_returns(con, [previous or season]),
+        lineup=minutes_module.measure_lineup(con, [previous or season]),
     )
 
 
@@ -184,6 +186,7 @@ def models_as_of(con, context: SeasonContext, gameweek: int) -> project.Projecti
         flow=context.flow,
         minutes_profile=context.minutes_profile,
         team_returns=context.team_returns,
+        lineup=context.lineup,
     )
 
 
