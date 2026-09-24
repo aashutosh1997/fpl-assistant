@@ -248,6 +248,43 @@ GW13, and the plan sold him for a hit. A doubt now caps the next gameweek only, 
 with a date in the news ("Expected back 11 Oct") lifts on that date; without one the player
 stays out for the horizon.
 
+### The second pass, component by component
+
+`fpl backtest components` replays every fourth deadline of the nine seasons and sets each
+position's simulated points against FPL's, one scoring component at a time, which is where the
+totals had been hiding offsetting errors. It found three more, each now measured on the
+previous completed season rather than set:
+
+| | Was | Now |
+|---|---|---|
+| Cameos per team-match | 3.0 | measured: 3.2–3.5 until 2022, 4.6–4.9 since the five-substitute rule, when a third of them were missing (34 simulated midfield cameos a gameweek against 53) |
+| Expected stats before FPL published them | 2022-23 gameweeks 1–15 stored as 0.0, read as a drought of chances | unobserved |
+| xG and xA in the goal and assist rates | blended raw, 0.75 | converted into FPL units per position first (defenders score 0.76–0.93 FPL goals per xG; forwards earn 2.1 FPL assists per xA, everyone else 1.1–1.4), then blended 0.8 and 0.6, the weights with the lowest out-of-sample deviance over 2023-26 |
+
+The raw blend is what tilted captaincy: it gave defenders' assists four-tenths too much weight
+relative to forwards'. In the xG era defenders' goals and assists went from 1.19 and 1.18 of
+actual to 1.03 and 1.05, forwards' assists from 0.77 to 0.92, and actual points over projected
+to 1.007. The planner was then re-tuned on the corrected scale, replaying three prices for a
+banked transfer through one pool:
+
+| panel.5 | Points a season | Hits a season | Captain points |
+|---|---|---|---|
+| Banked transfer 2.0 | 2,235 | 6.4 | 290 |
+| **Banked transfer 3.0** | **2,275** | 3.3 | 308 |
+| Banked transfer 4.0 | 2,243 | 0.3 | 297 |
+
+Three beats two by 40 a season (SE 17), in seven seasons of nine and with half the hits, and is
+the new default; four gives 32 of it back. Against the planner as it stood before any of this
+(the first engine, banked 2.0, 2,262) the corrected engine with the re-tuned planner scores 13 a
+season more (SE 23, up in three seasons of nine): level on points, with projections that are now
+right in total and much closer by position. The engine changes of this pass alone, both on banked 2.0, are worth 26 a
+season over the first pass (SE 27, six seasons of nine).
+
+What is left of the defender bias is no longer the within-team split. Likely-starting defenders
+play an hour less often than predicted (57.5% against a predicted 64% in the middle band, 80%
+against 85% above it) while the other positions are calibrated, and the team model predicts
+clean sheets about 6% too often. Those are the next measurements.
+
 ### The order book
 
 `selected`, `transfers_in` and `transfers_out` exist for every historical player-gameweek and
@@ -272,8 +309,9 @@ Stated because they affect how much to trust an answer, not buried:
   analysis uses each rival's last completed gameweek plus a template-drift assumption.
 - **A backtest cannot validate bonus or prices for 2026/27**, because the rules changed. It
   validates the engine — fixtures, minutes, goals, assists, clean sheets.
-- **Defenders run about 0.2 points a week high** after the engine fixes, through their share of
-  their team's goals and assists; the next measurement, which needs components in the panel.
+- **Starting defenders run about 0.2 points a week high**: the minutes model is over-confident
+  about likely-starting defenders alone (57.5% play an hour against a predicted 64% in the middle
+  band), and the team model predicts clean sheets about 6% too often.
 - **A player back from one missed match is projected at the historical rate** for regular starters
   who miss one: 45% to play an hour next time, 59% five matches on. History records no injury
   flags, so a 75% knock, which probably returns faster than that average, cannot be told apart

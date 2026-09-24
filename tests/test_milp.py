@@ -13,8 +13,11 @@ import pytest
 
 from fplass.optimise.milp import (
     CLUB_LIMIT,
+    DEFAULT_BANKED_TRANSFER_VALUE,
+    DEFAULT_BENCH_WEIGHT,
     HIT_COST,
     LINEUP_SIZE,
+    MAX_BANKED_TRANSFERS,
     SQUAD_QUOTA,
     SQUAD_SIZE,
     ChipWindows,
@@ -322,7 +325,13 @@ def test_objective_is_not_double_counted(points, universe, windows):
     state = SquadState(players={}, bank=1000, free_transfers=15)
     plan = solve_scenario(points, universe, state, windows, allow_chips=False)
     best_possible = points.max().sum() * (LINEUP_SIZE + 1)
-    assert 0 < plan.objective < best_possible
+    # The objective also credits free transfers held and the bench, which are not points; a
+    # double-counted squad would still overshoot this by roughly the whole bound again.
+    credits = (
+        DEFAULT_BANKED_TRANSFER_VALUE * MAX_BANKED_TRANSFERS
+        + DEFAULT_BENCH_WEIGHT * (SQUAD_SIZE - LINEUP_SIZE) * float(points.max().max())
+    ) * points.shape[1]
+    assert 0 < plan.objective < best_possible + credits
     for gw, expected in plan.expected_points.items():
         realistic = points[gw].nlargest(LINEUP_SIZE + 1).sum()
         assert expected <= realistic + 1e-6, f"GW{gw} scores more than its best possible XI"

@@ -132,7 +132,9 @@ def test_terminal_value_stops_the_solver_selling_the_future():
                          & (universe["price"] <= price.loc[sleeper] + held.bank)]
     assert len(outsiders), "need an affordable forward outside the squad"
     rival = int(outsiders.iloc[0]["element"])
-    points.loc[rival] = 1.0
+    # Clearly worth more than the free transfer it costs, whatever that is priced at: selling in a
+    # week forfeits the banked credit for that week and every one after it in the horizon.
+    points.loc[rival] = 2 * milp.DEFAULT_BANKED_TRANSFER_VALUE
 
     without = milp.solve(points, universe, held, windows, gameweeks=gameweeks,
                          allow_chips=False, time_limit=30)

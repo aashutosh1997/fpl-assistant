@@ -63,11 +63,12 @@ SELL_ON_FEE = 0.5
 DEFAULT_BENCH_WEIGHT = 0.12
 # A banked transfer: the second-best swap at the next deadline is worth 8.7 projected points on
 # average over the replayed weeks, so the hit an extra free transfer saves is nearly the full
-# four (3.5 measured). Priced at two — the projected gains that measure it are the same ones
-# that bought the baseline's 25 hits a season, and half of them did not materialise — the replay
-# scores 31 points a season more alone and 59 more with the continuation chip rule, with hits
-# falling from 25 a season to 3. The old 0.25 was a tie-breaker, not a value.
-DEFAULT_BANKED_TRANSFER_VALUE = 2.0
+# four (3.5 measured). The projected gains that measure it are the same ones that buy hits, and
+# half of those never materialise, so the price is set by replay. On the first engine, whose
+# projections ran a fifth low, two was worth 31 points a season over the old 0.25 tie-breaker.
+# On the corrected engine (panel.5) three scores 40 a season more than two (SE 17, seven seasons
+# of nine) with half the hits, and four gives 32 of that back.
+DEFAULT_BANKED_TRANSFER_VALUE = 3.0
 
 CHIPS = ("wildcard", "freehit", "bboost", "3xc")
 
