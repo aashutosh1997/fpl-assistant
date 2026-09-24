@@ -746,7 +746,7 @@ def project(
     return result, player_matches, models
 
 
-MODEL_VERSION = "2026-27.3"
+MODEL_VERSION = "2026-27.4"
 
 
 def store_projection(

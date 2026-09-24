@@ -64,7 +64,7 @@ from ..sim.engine import SimulationResult, simulate
 
 log = logging.getLogger(__name__)
 
-PANEL_VERSION = "panel.2"
+PANEL_VERSION = "panel.3"
 DEFAULT_DRAWS = 2_000
 DEFAULT_HORIZON = 8
 PANEL_KEY = ("season", "as_of_gw", "target_gw", "element")

@@ -313,7 +313,17 @@ def simulate(
             if active.any():
                 row_conceded[:, rows[active]] = conceded[:, active]
 
-        clean_sheet = ((row_conceded == 0) & (minutes >= 60)).astype("int16")
+        # Goals conceded count only while the player is on the pitch: none if he did not play,
+        # all of them over ninety minutes, and a minutes-proportional thinning (uniform goal
+        # timing) in between. Charging the whole match to every row priced a keeper or defender
+        # who never came on at about -1 a week. Clean sheets are judged on the same on-pitch count.
+        on_pitch = np.where(
+            minutes >= 90,
+            row_conceded,
+            rng.binomial(row_conceded, np.clip(share_of_90, 0.0, 1.0)),
+        ).astype("int16")
+
+        clean_sheet = ((on_pitch == 0) & (minutes >= 60)).astype("int16")
 
         # Defensive contribution: a count with more spread than Poisson, so negative binomial.
         # Overdispersion matters because the payoff is a threshold — a Poisson would understate
@@ -328,7 +338,7 @@ def simulate(
             # Save volume scales with how much the opponent threatens, which the sampled goals
             # conceded proxies for; add a base rate so a shut-out keeper still makes saves.
             expected_saves = (
-                save_rate[None, :] * share_of_90 * (0.6 + 0.4 * row_conceded)
+                save_rate[None, :] * share_of_90 * (0.6 + 0.4 * on_pitch)
             )
             saves = np.where(
                 is_gkp[None, :], rng.poisson(np.maximum(expected_saves, 1e-9)), 0
@@ -345,7 +355,7 @@ def simulate(
                 "goals_scored": goals.ravel(),
                 "assists": assists.ravel(),
                 "clean_sheets": clean_sheet.ravel(),
-                "goals_conceded": row_conceded.ravel(),
+                "goals_conceded": on_pitch.ravel(),
                 "saves": saves.ravel(),
                 "yellow_cards": yellows.ravel(),
                 "defcon_count": defcon.ravel(),
