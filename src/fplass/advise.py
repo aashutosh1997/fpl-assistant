@@ -220,7 +220,7 @@ def advise(
 
     # ---- 2. simulate the horizon
     models = models or project.fit_models(con, season=season)
-    availability = players[["element", "status", "chance_of_playing_next_round"]]
+    availability = players[["element", "status", "chance_of_playing_next_round", "news"]]
     flow = _live_flow(con, players, season, target_gameweek, deadline)
     result, player_matches, models = project.project(
         con,

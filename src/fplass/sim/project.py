@@ -472,9 +472,10 @@ def build_projection_inputs(
     """Build the player-match frame and minutes probabilities for the requested gameweeks.
 
     Args:
-        availability: Optional live ``element``/``status``/``chance_of_playing_next_round`` frame.
-            Applied on top of the model's historical-pattern prediction, since per-gameweek
-            availability was never recorded historically and so cannot be learned.
+        availability: Optional live ``element``/``status``/``chance_of_playing_next_round``/
+            ``news`` frame. Applied on top of the model's historical-pattern prediction, since
+            per-gameweek availability was never recorded historically and so cannot be learned;
+            a doubt caps the first gameweek only and a dated absence lifts on its date.
         flow: Live order flow per ``element`` (``flow_out``, ``flow_in``) from
             :func:`fplass.features.flow.live_flow`. For a historical season the flow is read
             from the warehouse instead. Applied before the availability ceiling, so a player
@@ -546,11 +547,18 @@ def build_projection_inputs(
             player_matches["flow_shift"] = probabilities["p_full"].to_numpy() - before_flow
 
     if availability is not None:
-        merged = player_matches[["element"]].merge(availability, on="element", how="left")
+        deadlines = dict(
+            con.execute(
+                "SELECT event, deadline_time FROM events WHERE season = ?", [season]
+            ).fetchall()
+        )
+        flags = minutes_module.availability_by_gameweek(
+            availability, player_matches.reset_index(drop=True), deadlines, season
+        )
         probabilities = minutes_module.apply_availability(
-            probabilities,
-            status=merged.get("status"),
-            chance_of_playing=merged.get("chance_of_playing_next_round"),
+            probabilities.reset_index(drop=True),
+            status=flags["status"],
+            chance_of_playing=flags["chance_of_playing_next_round"],
         )
 
     # The base model's own view, before recalibration and the lineup constraint. Stored alongside

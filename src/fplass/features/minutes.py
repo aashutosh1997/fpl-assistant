@@ -25,6 +25,7 @@ a feature that will not exist when it matters.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 
 import numpy as np
@@ -261,6 +262,81 @@ def fit(
             n_train=len(usable),
         ),
         holdout,
+    )
+
+
+# FPL's news gives a date for most absences: "Expected back 11 Oct", "Suspended until 17 Oct".
+RETURN_DATE = re.compile(r"(?:Expected back|Suspended until) (\d{1,2}) ([A-Z][a-z]{2})")
+MONTHS = {m: i for i, m in enumerate(
+    ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"), start=1)}
+
+
+def return_date(news: str | None, season: str) -> pd.Timestamp | None:
+    """The date a flagged player is due back, read from FPL's news, or None if it gives none.
+
+    The year comes from the season: August to December are its first year, the rest its second.
+    """
+    match = RETURN_DATE.search(news or "")
+    if not match or match.group(2) not in MONTHS:
+        return None
+    month = MONTHS[match.group(2)]
+    first_year = int(season[:4])
+    year = first_year if month >= 8 else first_year + 1
+    try:
+        return pd.Timestamp(year=year, month=month, day=int(match.group(1)))
+    except ValueError:
+        return None
+
+
+def availability_by_gameweek(
+    availability: pd.DataFrame,
+    rows: pd.DataFrame,
+    deadlines: dict[int, pd.Timestamp],
+    season: str,
+) -> pd.DataFrame:
+    """Today's flags as they apply to each player-match row of a horizon.
+
+    ``chance_of_playing_next_round`` is FPL's view of the next gameweek only. Applying it to every
+    gameweek of the horizon held a player with a knock at a quarter-off ceiling for two months:
+    Cole Palmer, flagged 75% before GW6 after five straight starts, projected at a 48-62% chance of
+    an hour through GW13. So a doubt caps the first gameweek alone; an absence with a return date
+    rules the player out until that date; an absence without one, or a player who has left the
+    club, stays ruled out for the horizon, since nothing says when it ends.
+
+    Args:
+        availability: ``element``, ``status``, ``chance_of_playing_next_round`` and ``news``.
+        rows: The player-match frame, with ``element`` and ``event``.
+        deadlines: Deadline per gameweek; a gameweek counts as after a return date when its
+            deadline falls on or after that day.
+        season: The season, for the year of a news date.
+
+    Returns:
+        ``status`` and ``chance_of_playing_next_round`` aligned to ``rows``.
+    """
+    merged = rows[["element", "event"]].merge(availability, on="element", how="left")
+    first = int(rows["event"].min()) if len(rows) else 0
+    status = merged["status"].copy()
+    chance = pd.to_numeric(merged["chance_of_playing_next_round"], errors="coerce")
+    later = merged["event"].to_numpy() > first
+
+    news = merged["news"] if "news" in merged.columns else pd.Series(None, index=merged.index)
+    back = news.map(lambda text: return_date(text, season))
+    deadline = merged["event"].map(lambda gw: deadlines.get(int(gw))).map(
+        lambda d: pd.Timestamp(d).normalize() if d is not None and pd.notna(d) else None
+    )
+    returned = pd.Series(
+        [b is not None and d is not None and d >= b for b, d in zip(back, deadline, strict=True)],
+        index=merged.index,
+    )
+
+    doubt_passed = later & (status == "d").to_numpy()
+    absence_over = later & status.isin(["i", "s"]).to_numpy() & returned.to_numpy()
+    clear = doubt_passed | absence_over
+    status = status.mask(clear, "a")
+    chance = chance.mask(clear)
+    return pd.DataFrame(
+        {"status": status.to_numpy(), "chance_of_playing_next_round": chance.to_numpy()},
+        index=rows.index,
     )
 
 

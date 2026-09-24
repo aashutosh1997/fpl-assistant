@@ -200,7 +200,7 @@ def test_layer_improves_gameweek_one(con):
     """
     from fplass.backtest import calibrate_live
 
-    report = calibrate_live.run(con, upto_gw=99, fit_adjustment=True)
+    report = calibrate_live.run(con, upto_gw=2, fit_adjustment=True)  # gw < 2: gameweek 1 alone
     if report is None or report.adjustment is None:
         pytest.skip("no stored projections to calibrate against")
 

@@ -6,12 +6,15 @@ projection, because the historical dataset records no per-gameweek availability 
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from fplass.features.minutes import (
     FULL_APPEARANCES_PER_TEAM,
     apply_availability,
+    availability_by_gameweek,
     calibrate_to_lineup,
+    return_date,
 )
 
 
@@ -98,3 +101,44 @@ def pytest_approx(value, tol=1e-6):
             return f"~{value}"
 
     return _Approx()
+
+
+def _horizon_rows():
+    return pd.DataFrame({"element": [1] * 3 + [2] * 3 + [3] * 3 + [4] * 3 + [5] * 3,
+                         "event": [6, 7, 8] * 5})
+
+
+DEADLINES = {6: pd.Timestamp("2026-10-10 10:00"), 7: pd.Timestamp("2026-10-17 10:00"),
+             8: pd.Timestamp("2026-10-23 17:30")}
+
+
+def test_news_dates_resolve_to_the_right_year():
+    assert return_date("Hamstring injury - Expected back 11 Oct", "2026-27") == pd.Timestamp("2026-10-11")
+    assert return_date("Suspended until 03 Jan", "2026-27") == pd.Timestamp("2027-01-03")
+    assert return_date("Knee injury - 75% chance of playing", "2026-27") is None
+    assert return_date("Unspecified injury - Unknown return date", "2026-27") is None
+
+
+def test_flags_apply_to_the_gameweeks_they_describe():
+    """Pinned against GW6: Palmer's 75% doubt held him at a reduced ceiling through GW13."""
+    availability = pd.DataFrame({
+        "element": [1, 2, 3, 4, 5],
+        "status": ["d", "i", "s", "i", "u"],
+        "chance_of_playing_next_round": [75.0, 0.0, 0.0, 0.0, 0.0],
+        "news": ["Muscular injury - 75% chance of playing",
+                 "Foot injury - Expected back 11 Oct",
+                 "Suspended until 17 Oct",
+                 "Unspecified injury - Unknown return date",
+                 "Has joined Stoke City permanently"],
+    })
+    flags = availability_by_gameweek(availability, _horizon_rows(), DEADLINES, "2026-27")
+    status = flags["status"].to_numpy().reshape(5, 3)
+    chance = flags["chance_of_playing_next_round"].to_numpy().reshape(5, 3)
+    # A doubt caps the next gameweek only.
+    assert list(status[0]) == ["d", "a", "a"] and chance[0, 0] == 75.0 and np.isnan(chance[0, 1])
+    # Dated absences lift on their date: back 11 Oct misses GW6 (10 Oct) and plays GW7.
+    assert list(status[1]) == ["i", "a", "a"]
+    assert list(status[2]) == ["s", "a", "a"]
+    # No date, or gone: out for the whole horizon.
+    assert list(status[3]) == ["i", "i", "i"]
+    assert list(status[4]) == ["u", "u", "u"]
