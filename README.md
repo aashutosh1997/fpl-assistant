@@ -79,7 +79,7 @@ Other components are validated where they can be:
 | Player ranking | GW1 top-30 by projection scored 2.05x the league average |
 | DEFCON reconstruction | Identity verified exactly against 2025-26 actuals |
 | Minutes model | Brier skill 0.51–0.59 one week ahead in every replayed season (see below) |
-| **Whole pipeline, replayed** | **Nine seasons, 2.2 million as-of projections: one-week Spearman 0.66–0.69, top-30 lift 3.2–4.5x** |
+| **Whole pipeline, replayed** | **Nine seasons, 2.2 million as-of projections: one-week Spearman 0.67–0.72, top-30 lift 3.2–4.5x** |
 
 ### What gameweek 1 taught us
 
@@ -116,11 +116,11 @@ projection for the next twelve gameweeks. Scored against what happened:
 
 | Weeks ahead | Spearman (EP vs points) | Top-30 lift | Minutes Brier | Minutes skill |
 |---|---|---|---|---|
-| 0 (the deadline's week) | 0.67 | 3.7x | 0.097 | 0.55 |
-| 1 | 0.63 | 3.5x | 0.118 | 0.45 |
-| 3 | 0.58 | 3.3x | 0.141 | 0.35 |
-| 7 | 0.53 | 3.1x | 0.162 | 0.25 |
-| 11 | 0.50 | 3.0x | 0.176 | 0.19 |
+| 0 (the deadline's week) | 0.69 | 3.7x | 0.097 | 0.55 |
+| 1 | 0.64 | 3.5x | 0.118 | 0.45 |
+| 3 | 0.60 | 3.3x | 0.141 | 0.35 |
+| 7 | 0.55 | 3.1x | 0.162 | 0.25 |
+| 11 | 0.52 | 3.0x | 0.176 | 0.19 |
 
 Every season sits within a few hundredths of those means, and the live 2026/27 gameweeks land in
 the same range (GW2: 0.64 and 3.9x), which is the point: the replay is an honest stand-in for
@@ -195,6 +195,59 @@ of nine up), so the horizon keeps its cliff for now; with a banked transfer pric
 two-, four-, six- and ten-week plans for the live squad already agree on the first move, which
 was the symptom it was meant to cure.
 
+### What the engine got wrong, found after gameweek 5
+
+Scoring GW3–5 against the stored projections, and the panel against ten seasons, showed the
+simulator under-projecting total points by 14–30% in every season. Most of it was one bug: every
+keeper and defender was charged his team's goals conceded whether or not he played, so a player
+who never came on projected at about −1 a week and a quarter of all projections were negative.
+Charging goals conceded only while a player is on the pitch, which is FPL's rule, then exposed
+the errors it had been offsetting. Each is now measured on the previous completed season rather
+than set by hand:
+
+| | Was | Now |
+|---|---|---|
+| Goals conceded | the whole match, for everyone on the team | only while on the pitch, thinned by minutes played |
+| Minutes within a class | uniform over 60–90 and 1–59 | measured per position: keepers play all ninety in 99.6% of their 60+ appearances, defenders 88%, midfielders 62%, forwards 54%; outfield cameos average 21–23 minutes |
+| Team goals carrying an FPL assist | 65% | 86–90%, in every season since 2016 |
+| Own goals | credited to a player | 3–4% of team goals, credited to no one |
+| Saves against goals conceded | 0.6 + 0.4 a goal (averaging 1.15) | the measured line, about 2.6 + 0.1–0.3 a goal, scaled to average one |
+
+The goals-conceded fix on its own over-projected starting defenders by half a point a week: with
+uniform minutes a simulated defender left early and kept clean sheets for goals conceded after
+he went. Across the nine replayed seasons, one week ahead:
+
+| | Before | Goals conceded alone | All five |
+|---|---|---|---|
+| Actual points ÷ projected | 1.20 | 1.01 | 1.03 |
+| Negative projections | 23.5% | 0 | 0 |
+| Spearman, mean of seasons | 0.672 | 0.683 | 0.686 |
+| Starters' bias a week, GK / DEF / MID / FWD | +0.28 / −0.04 / +0.14 / +0.15 | −0.05 / −0.46 / +0.10 / +0.17 | +0.16 / −0.21 / +0.01 / +0.12 |
+
+Spearman rose in every season one week ahead, and at every horizon on average (0.50 to 0.52 at
+eleven weeks). Defenders are still projected about 0.2 a week high, most likely through their
+share of the team's goals and assists, which six gameweeks of components cannot settle; that is
+the next measurement.
+
+Replayed with the default planner, the chip thresholds re-measured on the new projections, the
+fixed engine scores **2,209 a season against 2,262** on the old one: −54 (SE 32), up in two
+seasons of nine. The largest piece is captaincy, 18 points a season: captains moved from
+forwards (30% of weeks to 24%) towards defenders and keepers (5% to 7%), consistent with the
+defender bias above. Hits rose from 3 a season to 5, plausibly because the banked transfer's two
+points were tuned on projections that ran 20% low. By the rule the rest of this README follows, that is not
+an improvement. It is live anyway, as a deliberate choice: the projections are more accurate on
+every measure the replay can score, the loss sits at the noise floor, and its causes are named.
+The live chip thresholds (`data/measured/chip_gains.csv`) are the ones re-measured on the new
+projections, and the next replay (the defender allocation, and the planner re-tuned on the new
+scale) is judged against this 2,209.
+
+A second error lived only in the live path. FPL's `chance_of_playing_next_round` describes the
+next gameweek, but it was applied to every gameweek of the horizon: Cole Palmer, flagged 75%
+before GW6 after five straight starts, projected at a 48–62% chance of an hour all the way to
+GW13, and the plan sold him for a hit. A doubt now caps the next gameweek only, and an absence
+with a date in the news ("Expected back 11 Oct") lifts on that date; without one the player
+stays out for the horizon.
+
 ### The order book
 
 `selected`, `transfers_in` and `transfers_out` exist for every historical player-gameweek and
@@ -219,6 +272,12 @@ Stated because they affect how much to trust an answer, not buried:
   analysis uses each rival's last completed gameweek plus a template-drift assumption.
 - **A backtest cannot validate bonus or prices for 2026/27**, because the rules changed. It
   validates the engine — fixtures, minutes, goals, assists, clean sheets.
+- **Defenders run about 0.2 points a week high** after the engine fixes, through their share of
+  their team's goals and assists; the next measurement, which needs components in the panel.
+- **A player back from one missed match is projected at the historical rate** for regular starters
+  who miss one: 45% to play an hour next time, 59% five matches on. History records no injury
+  flags, so a 75% knock, which probably returns faster than that average, cannot be told apart
+  from a player who was dropped.
 - **Doubles and blanks do not exist yet.** All 38 gameweeks currently have ten fixtures; chip values
   will shift materially as postponements land, and the roadmap recomputes on every run.
 
