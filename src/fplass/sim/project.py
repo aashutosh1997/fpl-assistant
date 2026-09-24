@@ -62,6 +62,12 @@ class ProjectionModels:
     # history where it stands in for the availability news that was never recorded. Applied to
     # the deadline's own gameweek only.
     flow: flow_module.FlowLayer | None = None
+    # How long appearances last within each minutes class, by position, measured on the last
+    # completed season. None falls back to uniform lengths.
+    minutes_profile: minutes_module.MinutesProfile | None = None
+    # How the scoreline becomes goals, assists and saves, measured on the last completed season.
+    # None falls back to the engine's constants.
+    team_returns: rates_module.TeamReturns | None = None
 
 
 def fit_models(
@@ -86,12 +92,13 @@ def fit_models(
 
     rate_table, _ = rates_module.build(con)
 
+    played = con.execute(
+        "SELECT season FROM player_gw GROUP BY season "
+        "HAVING count(DISTINCT gw) >= 38 ORDER BY season DESC LIMIT 1"
+    ).fetchone()
+    last_completed = played[0] if played else season
     if bps_seasons is None:
-        played = con.execute(
-            "SELECT season FROM player_gw GROUP BY season "
-            "HAVING count(DISTINCT gw) >= 38 ORDER BY season DESC LIMIT 1"
-        ).fetchone()
-        bps_seasons = [played[0]] if played else [season]
+        bps_seasons = [last_completed]
     bps_model = bps_module.fit(con, seasons=bps_seasons)
 
     return ProjectionModels(
@@ -103,6 +110,8 @@ def fit_models(
         season=season,
         minutes_adjustment=fit_minutes_adjustment(con, season),
         flow=flow_layer,
+        minutes_profile=minutes_module.measure_profile(con, [last_completed]),
+        team_returns=rates_module.measure_team_returns(con, [last_completed]),
     )
 
 
@@ -729,6 +738,8 @@ def project(
         rho=models.strength.rho,
         n_draws=n_draws,
         seed=seed,
+        minutes_profile=models.minutes_profile,
+        team_returns=models.team_returns,
     )
 
     if store:

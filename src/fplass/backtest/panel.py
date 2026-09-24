@@ -64,7 +64,7 @@ from ..sim.engine import SimulationResult, simulate
 
 log = logging.getLogger(__name__)
 
-PANEL_VERSION = "panel.3"
+PANEL_VERSION = "panel.4"
 DEFAULT_DRAWS = 2_000
 DEFAULT_HORIZON = 8
 PANEL_KEY = ("season", "as_of_gw", "target_gw", "element")
@@ -81,6 +81,8 @@ class SeasonContext:
     gameweeks: list[int]  # gameweek labels with fixtures, in order
     sequence: dict[int, int]  # gameweek label -> dense sequence number
     flow: flow_module.FlowLayer | None = None
+    minutes_profile: minutes_module.MinutesProfile | None = None
+    team_returns: rates_module.TeamReturns | None = None
 
 
 def panel_seasons(con) -> list[str]:
@@ -149,6 +151,9 @@ def season_context(con, season: str) -> SeasonContext:
         gameweeks=season_gameweeks(con, season),
         sequence=gameweek_sequence(con, season),
         flow=flow_layer,
+        # Appearance lengths from the previous season, the same prior the bonus model uses.
+        minutes_profile=minutes_module.measure_profile(con, [previous or season]),
+        team_returns=rates_module.measure_team_returns(con, [previous or season]),
     )
 
 
@@ -177,6 +182,8 @@ def models_as_of(con, context: SeasonContext, gameweek: int) -> project.Projecti
         rules=context.rules,
         season=context.season,
         flow=context.flow,
+        minutes_profile=context.minutes_profile,
+        team_returns=context.team_returns,
     )
 
 
@@ -240,6 +247,8 @@ def project_deadline(
         rho=models.strength.rho,
         n_draws=n_draws,
         seed=seed + gameweek,
+        minutes_profile=models.minutes_profile,
+        team_returns=models.team_returns,
     )
     return summarise(
         result, probabilities, player_matches, season=context.season, as_of_gw=gameweek

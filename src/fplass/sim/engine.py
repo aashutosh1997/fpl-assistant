@@ -35,19 +35,23 @@ import numpy as np
 import pandas as pd
 
 from ..features.bps import BPSModel, allocate_bonus
+from ..features.minutes import CAMEO_RANGE, FULL_RANGE, MinutesProfile
+from ..features.rates import TeamReturns
 from ..scoring import ScoringRules, normalise_positions
 from .match import sample_scorelines
 
 log = logging.getLogger(__name__)
 
-# Roughly a third of Premier League goals are unassisted (solo efforts, deflections, rebounds,
-# penalties). Allocating every goal an assister would inflate midfield assist returns badly.
+# Roughly a third of Premier League goals are unassisted by Opta's definition. FPL's assists are
+# more generous and went with 86-90% of team goals in 2016-26, so this stands only when no
+# measured :class:`TeamReturns` is given.
 UNASSISTED_GOAL_SHARE = 0.35
 
 # Minutes drawn within each class. The cameo range is wide because it covers both early
-# substitutions off and late substitutions on.
-CAMEO_MINUTES = (1, 59)
-FULL_MINUTES = (60, 90)
+# substitutions off and late substitutions on. Where in the range is drawn from the measured
+# :class:`MinutesProfile`, and uniformly only when no profile is given.
+CAMEO_MINUTES = CAMEO_RANGE
+FULL_MINUTES = FULL_RANGE
 
 DEFCON_THRESHOLDS = {"DEF": 10, "MID": 12, "FWD": 12, "GKP": 10**6}
 
@@ -110,9 +114,18 @@ def build_player_matches(
 
 
 def _sample_minutes(
-    probabilities: np.ndarray, rng: np.random.Generator, n_draws: int
+    probabilities: np.ndarray,
+    rng: np.random.Generator,
+    n_draws: int,
+    *,
+    position: np.ndarray | None = None,
+    profile: MinutesProfile | None = None,
 ) -> np.ndarray:
-    """Sample minutes for each (draw, player-match) from the three-class distribution."""
+    """Sample minutes for each (draw, player-match) from the three-class distribution.
+
+    The class comes from the minutes model; the length within it from the measured ``profile``
+    for the row's position, or uniformly over the class's range when there is none.
+    """
     n_rows = probabilities.shape[0]
     uniform = rng.random((n_draws, n_rows))
 
@@ -123,12 +136,21 @@ def _sample_minutes(
     is_cameo = (uniform >= p_none) & (uniform < p_none + p_cameo)
     is_full = uniform >= p_none + p_cameo
 
-    minutes[is_cameo] = rng.integers(
-        CAMEO_MINUTES[0], CAMEO_MINUTES[1] + 1, size=int(is_cameo.sum()), dtype="int16"
-    )
-    minutes[is_full] = rng.integers(
-        FULL_MINUTES[0], FULL_MINUTES[1] + 1, size=int(is_full.sum()), dtype="int16"
-    )
+    for kind, in_class, (low, high) in (
+        ("cameo", is_cameo, CAMEO_MINUTES),
+        ("full", is_full, FULL_MINUTES),
+    ):
+        groups = np.unique(position) if profile is not None and position is not None else [None]
+        for group in groups:
+            cells = in_class if group is None else in_class & (position == group)[None, :]
+            count = int(cells.sum())
+            if not count:
+                continue
+            cdf = profile.cdf(kind, group) if group is not None else None
+            if cdf is None:
+                minutes[cells] = rng.integers(low, high + 1, size=count, dtype="int16")
+            else:
+                minutes[cells] = low + np.searchsorted(cdf, rng.random(count), side="right")
     return minutes
 
 
@@ -216,6 +238,8 @@ def simulate(
     n_draws: int = 10_000,
     seed: int = 20262027,
     chunk_size: int = 2_000,
+    minutes_profile: MinutesProfile | None = None,
+    team_returns: TeamReturns | None = None,
 ) -> SimulationResult:
     """Run the simulation and return joint point samples.
 
@@ -232,6 +256,11 @@ def simulate(
         seed: Fixed so that repeated planning runs are comparable and reproducible. Changing it
             between two candidate plans would destroy the paired-comparison advantage.
         chunk_size: Draws processed at once. Bounds peak memory.
+        minutes_profile: How long appearances last within each minutes class, by position.
+            Without it the length is uniform over the class, which sends starting keepers and
+            defenders off early and credits them clean sheets for goals conceded after they left.
+        team_returns: How the scoreline becomes goals, assists and saves, measured. Without it
+            every team goal is credited, 65% are assisted and saves follow ``0.6 + 0.4 * conceded``.
 
     Returns:
         A :class:`SimulationResult`.
@@ -292,16 +321,23 @@ def simulate(
             team_is_home[None, :], away_goals[:, team_fixture], home_goals[:, team_fixture]
         )
 
-        minutes = _sample_minutes(minutes_probabilities, rng, size)
+        minutes = _sample_minutes(
+            minutes_probabilities, rng, size, position=position, profile=minutes_profile
+        )
         played = minutes > 0
         share_of_90 = minutes / 90.0
 
         # Only players on the pitch can be allocated a goal, and for longer if they played longer.
+        # Own goals are the team's but no player's.
+        credited = scored if team_returns is None else rng.binomial(scored, team_returns.scored)
         goal_weights = goal_weight[None, :] * share_of_90
-        goals = _allocate_to_players(scored, goal_weights, team_table, rng)
+        goals = _allocate_to_players(credited, goal_weights, team_table, rng)
 
         # Assists: allocate a share of the team's goals, excluding those that went unassisted.
-        assisted = rng.binomial(scored, 1.0 - UNASSISTED_GOAL_SHARE)
+        assisted_share = (
+            1.0 - UNASSISTED_GOAL_SHARE if team_returns is None else team_returns.assisted
+        )
+        assisted = rng.binomial(scored, assisted_share)
         assist_weights = assist_weight[None, :] * share_of_90
         assists = _allocate_to_players(assisted, assist_weights, team_table, rng)
 
@@ -337,9 +373,12 @@ def simulate(
         if is_gkp.any():
             # Save volume scales with how much the opponent threatens, which the sampled goals
             # conceded proxies for; add a base rate so a shut-out keeper still makes saves.
-            expected_saves = (
-                save_rate[None, :] * share_of_90 * (0.6 + 0.4 * on_pitch)
+            response = (
+                0.6 + 0.4 * on_pitch
+                if team_returns is None
+                else team_returns.save_response(on_pitch)
             )
+            expected_saves = save_rate[None, :] * share_of_90 * response
             saves = np.where(
                 is_gkp[None, :], rng.poisson(np.maximum(expected_saves, 1e-9)), 0
             ).astype("int16")

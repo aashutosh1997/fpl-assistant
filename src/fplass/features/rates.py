@@ -354,3 +354,70 @@ def build(
         raise ValueError("no player history available for the requested cutoff")
     priors = fit_priors(totals)
     return shrink(totals, priors), priors
+
+
+@dataclass(slots=True)
+class TeamReturns:
+    """How a team's scoreline becomes its players' FPL returns, measured from a season.
+
+    ``scored`` is the share of team goals credited to one of its players (the rest are own goals
+    by the opposition) and ``assisted`` the share that also earns an FPL assist. FPL's assists are
+    more generous than Opta's (rebounds, penalties won, deflected passes): in 2016-26 an assist
+    went with 86-90% of team goals every season, not the two thirds a hand-set 35% unassisted
+    share gave, which left every attacker's assists a quarter short.
+
+    Saves respond to goals conceded far less than the hand-set ``0.6 + 0.4 * conceded`` had it:
+    among ninety-minute keepers, saves ~ 2.6 + 0.1-0.3 per goal conceded in every season. The
+    line is kept here and applied normalised to its mean, so a keeper's own saves-per-90 rate
+    stays his average and the scoreline only tilts it.
+    """
+
+    scored: float
+    assisted: float
+    save_intercept: float
+    save_slope: float
+    mean_conceded: float
+    seasons: tuple[str, ...] = ()
+
+    def save_response(self, conceded: np.ndarray) -> np.ndarray:
+        """Multiplier on a keeper's saves rate given goals conceded, averaging one."""
+        typical = self.save_intercept + self.save_slope * self.mean_conceded
+        return (self.save_intercept + self.save_slope * conceded) / typical
+
+
+def measure_team_returns(con, seasons: list[str]) -> TeamReturns | None:
+    """Goal, assist and save responses to the scoreline in the given seasons, or None."""
+    team_goals, player_goals, assists = con.execute(
+        """
+        WITH team AS (
+            SELECT sum(team_h_score + team_a_score) AS goals
+            FROM fixtures
+            WHERE list_contains(?, season) AND finished AND team_h_score IS NOT NULL
+        ), credited AS (
+            SELECT sum(goals_scored) AS goals, sum(assists) AS assists
+            FROM player_gw
+            WHERE list_contains(?, season)
+        )
+        SELECT team.goals, credited.goals, credited.assists FROM team, credited
+        """,
+        [list(seasons), list(seasons)],
+    ).fetchone()
+    intercept, slope, conceded = con.execute(
+        """
+        SELECT regr_intercept(saves, goals_conceded), regr_slope(saves, goals_conceded),
+               avg(goals_conceded)
+        FROM player_gw_derived
+        WHERE list_contains(?, season) AND position IN ('GK', 'GKP') AND minutes = 90
+        """,
+        [list(seasons)],
+    ).fetchone()
+    if not team_goals or player_goals is None or assists is None or intercept is None:
+        return None
+    return TeamReturns(
+        scored=min(float(player_goals) / float(team_goals), 1.0),
+        assisted=min(float(assists) / float(team_goals), 1.0),
+        save_intercept=float(intercept),
+        save_slope=max(float(slope), 0.0),
+        mean_conceded=float(conceded),
+        seasons=tuple(seasons),
+    )

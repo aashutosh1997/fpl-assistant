@@ -32,6 +32,8 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
+from ..scoring import normalise_positions
+
 log = logging.getLogger(__name__)
 
 # Minutes outcome classes, in the order the model's probability columns follow.
@@ -39,6 +41,10 @@ CLASS_NONE, CLASS_CAMEO, CLASS_FULL = 0, 1, 2
 CLASS_LABELS = ("p_none", "p_cameo", "p_full")
 
 FULL_APPEARANCE_MINUTES = 60
+
+# The minutes an appearance can last within each class; FPL records at most ninety a match.
+CAMEO_RANGE = (1, FULL_APPEARANCE_MINUTES - 1)
+FULL_RANGE = (FULL_APPEARANCE_MINUTES, 90)
 
 FEATURES = (
     "roll_minutes_3",
@@ -487,3 +493,64 @@ def reliability(model: MinutesModel, holdout: pd.DataFrame, bins: int = 10) -> p
     out = pd.DataFrame(rows)
     out["error"] = out["observed"] - out["predicted"]
     return out
+
+
+@dataclass(slots=True)
+class MinutesProfile:
+    """How long a cameo and a full appearance last, by position, as measured in a season.
+
+    The model above predicts the class; the length within it decides the goals conceded while a
+    player is on the pitch, whether his clean sheet stands, and his share of his team's goals.
+    A uniform draw over 60-90 had a starting keeper leave early in almost every simulated match:
+    in 2017-26 keepers played the full ninety in 99.6% of their 60+ appearances, defenders in
+    88%, midfielders in 62% and forwards in 54%, and outfield cameos averaged 21-23 minutes, not
+    thirty.
+    """
+
+    cameo: dict[str, np.ndarray]  # position -> probability of each minute in CAMEO_RANGE
+    full: dict[str, np.ndarray]  # position -> probability of each minute in FULL_RANGE
+    seasons: tuple[str, ...] = ()
+
+    def cdf(self, kind: str, position: str) -> np.ndarray | None:
+        """Cumulative probabilities over the class's minutes, or None if never observed."""
+        table = self.cameo if kind == "cameo" else self.full
+        pmf = table.get(position)
+        if pmf is None:
+            return None
+        cumulative = np.cumsum(pmf)
+        cumulative[-1] = 1.0
+        return cumulative
+
+
+def measure_profile(con, seasons: list[str]) -> MinutesProfile:
+    """Measure the minutes distribution within each class from the given seasons.
+
+    Callers pass the last completed season before the one being projected, the same prior the
+    bonus model uses: the five-substitute rule moved defenders' full-ninety share from about 92%
+    to 83% in 2022-23, so pooling older seasons would carry the old game into the new one.
+    """
+    frame = con.execute(
+        """
+        SELECT position, minutes, count(*) AS n
+        FROM player_gw_derived
+        WHERE list_contains(?, season) AND minutes > 0
+        GROUP BY position, minutes
+        """,
+        [list(seasons)],
+    ).fetchdf()
+    frame["position"] = normalise_positions(frame["position"])
+    frame["minutes"] = frame["minutes"].astype(int).clip(upper=FULL_RANGE[1])
+
+    cameo: dict[str, np.ndarray] = {}
+    full: dict[str, np.ndarray] = {}
+    for position, rows in frame.groupby("position"):
+        for table, (low, high) in ((cameo, CAMEO_RANGE), (full, FULL_RANGE)):
+            within = rows[(rows["minutes"] >= low) & (rows["minutes"] <= high)]
+            counts = np.bincount(
+                within["minutes"].to_numpy() - low,
+                weights=within["n"].to_numpy(dtype="float64"),
+                minlength=high - low + 1,
+            )
+            if counts.sum() > 0:
+                table[str(position)] = counts / counts.sum()
+    return MinutesProfile(cameo=cameo, full=full, seasons=tuple(seasons))
