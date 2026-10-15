@@ -31,6 +31,7 @@ from ..features import adjust as adjust_module
 from ..features import arrivals as arrivals_module
 from ..features import bps as bps_module
 from ..features import flow as flow_module
+from ..features import lineup_attack as lineup_attack_module
 from ..features import minutes as minutes_module
 from ..features import rates as rates_module
 from ..features import teams as teams_module
@@ -550,6 +551,10 @@ def build_projection_inputs(
             player_matches = player_matches.reset_index(drop=True)
             player_matches["flow_shift"] = probabilities["p_full"].to_numpy() - before_flow
 
+    # Kept so the attack adjustment below can compare the lineup the news leaves with the one the
+    # team's rating was earned by.
+    without_news = probabilities.reset_index(drop=True).copy() if availability is not None else None
+
     if availability is not None:
         deadlines = dict(
             con.execute(
@@ -575,17 +580,11 @@ def build_projection_inputs(
     # Recalibrate on this season's evidence — preseason minutes and ownership — before the lineup
     # constraint, so the constraint is enforced on the corrected probabilities rather than being
     # undone by them. The correction fades as current-season matches accumulate.
-    if models.minutes_adjustment is not None and not historical:
-        features = _adjustment_features(con, player_matches, season)
-        adjusted = models.minutes_adjustment.apply(
-            features, probabilities["p_full"].to_numpy(dtype="float64")
-        )
-        # Keep the three classes coherent: the cameo mass rescales with the room left over.
-        remaining = 1.0 - adjusted
-        old_remaining = (1.0 - probabilities["p_full"]).clip(lower=1e-9)
-        probabilities["p_cameo"] = (probabilities["p_cameo"] / old_remaining) * remaining
-        probabilities["p_full"] = adjusted
-        probabilities["p_none"] = 1.0 - probabilities["p_full"] - probabilities["p_cameo"]
+    adjustment_features = (
+        _adjustment_features(con, player_matches, season)
+        if models.minutes_adjustment is not None and not historical
+        else None
+    )
 
     # New signings since the last recorded gameweek make their club-mates' minutes uncertain in
     # a way no feature can see yet. Widen the affected players toward their club-position mean
@@ -596,7 +595,6 @@ def build_projection_inputs(
     arrivals = [] if historical else arrivals_module.detect_arrivals(con, season)
     risk = arrivals_module.disruption(player_matches, arrivals)
     player_matches["minutes_risk"] = risk.to_numpy(dtype="float64")
-    probabilities = arrivals_module.widen(probabilities, player_matches, risk)
 
     # Enforce eleven starters and three substitutes per club per fixture. Applied after the
     # availability adjustment so that a club missing players through injury redistributes those
@@ -609,9 +607,37 @@ def build_projection_inputs(
         if models.lineup is not None
         else {}
     )
-    probabilities = minutes_module.calibrate_to_lineup(
-        probabilities.reset_index(drop=True), team_match.reset_index(drop=True), **targets
-    )
+
+    def finish(probs: pd.DataFrame) -> pd.DataFrame:
+        """Recalibration, new-signing widening and the lineup constraint, in that order."""
+        probs = probs.reset_index(drop=True).copy()
+        if adjustment_features is not None:
+            adjusted = models.minutes_adjustment.apply(
+                adjustment_features, probs["p_full"].to_numpy(dtype="float64")
+            )
+            # Keep the three classes coherent: the cameo mass rescales with the room left over.
+            remaining = 1.0 - adjusted
+            old_remaining = (1.0 - probs["p_full"]).clip(lower=1e-9)
+            probs["p_cameo"] = (probs["p_cameo"] / old_remaining) * remaining
+            probs["p_full"] = adjusted
+            probs["p_none"] = 1.0 - probs["p_full"] - probs["p_cameo"]
+        probs = arrivals_module.widen(probs, player_matches, risk)
+        return minutes_module.calibrate_to_lineup(
+            probs.reset_index(drop=True), team_match.reset_index(drop=True), **targets
+        )
+
+    probabilities = finish(probabilities)
+
+    # The redistribution above hands an injured player's minutes to his club-mates, and with the
+    # team's expected goals unchanged it would hand them his goals too. Scale each side's expected
+    # goals by the attacking weight it now fields against the weight it would field without the
+    # news, so the goals are partly lost, as they are in practice.
+    if without_news is not None:
+        player_matches = lineup_attack_module.scale_for_lineups(
+            player_matches,
+            probabilities["p_full"].to_numpy(dtype="float64"),
+            finish(without_news)["p_full"].to_numpy(dtype="float64"),
+        )
 
     matrix = probabilities[list(minutes_module.CLASS_LABELS)].to_numpy(dtype="float64")
     # Guard against any drift from the availability adjustment.
