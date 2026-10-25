@@ -514,11 +514,13 @@ def build_projection_inputs(
         "goal_rate",
         "assist_rate",
         "defcon_rate",
+        "defcon_shape",
         "save_rate",
         "card_rate",
         "raw_minutes",
         "thin_sample",
     ]
+    rate_columns = [c for c in rate_columns if c in models.rates.columns]
     players = players.merge(models.rates[rate_columns], on="code", how="left")
 
     # A player with no history at all (a genuine newcomer to the league) gets his position's
@@ -526,6 +528,11 @@ def build_projection_inputs(
     for column in ("goal_rate", "assist_rate", "defcon_rate", "save_rate", "card_rate"):
         by_position = players.groupby("position")[column].transform("median")
         players[column] = players[column].fillna(by_position).fillna(0.0)
+    # His rate is a stand-in, so it carries as little evidence as the least-known rated player in
+    # his position, not the median's.
+    if "defcon_shape" in players.columns:
+        least_known = players.groupby("position")["defcon_shape"].transform("min")
+        players["defcon_shape"] = players["defcon_shape"].fillna(least_known)
 
     player_matches = build_player_matches(players, fixtures, gameweeks)
     if player_matches.empty:
@@ -800,7 +807,7 @@ def project(
     return result, player_matches, models
 
 
-MODEL_VERSION = "2026-27.5"
+MODEL_VERSION = "2026-27.6"
 
 
 def store_projection(

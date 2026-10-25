@@ -55,6 +55,36 @@ FULL_MINUTES = FULL_RANGE
 
 DEFCON_THRESHOLDS = {"DEF": 10, "MID": 12, "FWD": 12, "GKP": 10**6}
 
+# Match-to-match dispersion of the defensive-action count about a player's true rate,
+# ``variance = mean * (1 + mean / k)``. Fitted by maximum likelihood on 2025-26's full-ninety
+# appearances, each match's mean taken from the player's other full-ninety matches that season:
+# DEF 17.6 (2,415 matches), MID 21.6 (1,699), FWD 17.1 (291). With the true mean these reproduce
+# the threshold: midfielders cleared twelve in 26.6% of matches, 26.7% predicted.
+#
+# The engine does not know the true mean, only the posterior estimate, so the count it draws is
+# widened by the rate's own uncertainty as well (see :func:`defcon_dispersion`). The hand-set 4.0
+# this replaces stood in for both at once, which was about right in 2025-26 — the stat's first
+# season, when every rate was mostly prior — and far too wide a season later: replayed over the
+# 2026-27 deadlines it paid midfielders 1.57 times the DEFCON points they earned.
+DEFCON_DISPERSION = {"DEF": 17.6, "MID": 21.6, "FWD": 17.1, "GKP": 20.0}
+
+
+def defcon_dispersion(position: np.ndarray, shape: np.ndarray | None) -> np.ndarray:
+    """Effective dispersion of a player's defensive-action count, per row.
+
+    The rate is a Gamma posterior with shape ``shape`` and the match draws a negative binomial
+    about it, so the predictive variance is ``m + m**2 * (1/k + 1/shape + 1/(k * shape))``: a
+    well-known player sits near the match dispersion, a little-known one is as wide as his prior.
+    Without a shape (an older rates frame) only the match dispersion applies.
+    """
+    k = np.array([DEFCON_DISPERSION.get(p, 20.0) for p in position], dtype="float64")
+    if shape is None:
+        return k
+    # A shape under one is a goalkeeper's rate, which has no threshold to clear; floored so the
+    # draw stays well-behaved.
+    a = np.maximum(np.nan_to_num(np.asarray(shape, dtype="float64"), nan=1.0), 1.0)
+    return 1.0 / (1.0 / k + 1.0 / a + 1.0 / (k * a))
+
 
 @dataclass(slots=True)
 class SimulationResult:
@@ -307,6 +337,9 @@ def simulate(
     save_rate = frame["save_rate"].to_numpy(dtype="float64")
     card_rate = frame["card_rate"].to_numpy(dtype="float64")
     threshold = np.array([DEFCON_THRESHOLDS.get(p, 10**6) for p in position], dtype="float64")
+    dispersion = defcon_dispersion(
+        position, frame["defcon_shape"].to_numpy() if "defcon_shape" in frame.columns else None
+    )
 
     points = np.zeros((n_draws, len(elements), len(gameweeks)), dtype="int16")
     minutes_out = np.zeros((n_draws, len(elements), len(gameweeks)), dtype="int16")
@@ -370,10 +403,12 @@ def simulate(
         clean_sheet = ((on_pitch == 0) & (minutes >= 60)).astype("int16")
 
         # Defensive contribution: a count with more spread than Poisson, so negative binomial.
-        # Overdispersion matters because the payoff is a threshold — a Poisson would understate
-        # how often a mid-rate player has a big defensive game and clears the bar.
+        # The spread matters because the payoff is a threshold, so it comes from the measured
+        # match dispersion and the rate's own uncertainty (see defcon_dispersion) rather than a
+        # set constant: too little understates how often a mid-rate player clears the bar, too
+        # much overstates it.
         defcon_mean = np.maximum(defcon_rate[None, :] * share_of_90, 1e-9)
-        defcon = _negative_binomial(defcon_mean, rng, dispersion=4.0)
+        defcon = _negative_binomial(defcon_mean, rng, dispersion=dispersion[None, :])
         hit_defcon = (defcon >= threshold[None, :]) & played
 
         is_gkp = position == "GKP"
@@ -461,9 +496,9 @@ def simulate(
 
 
 def _negative_binomial(
-    mean: np.ndarray, rng: np.random.Generator, *, dispersion: float
+    mean: np.ndarray, rng: np.random.Generator, *, dispersion: float | np.ndarray
 ) -> np.ndarray:
-    """Negative binomial counts with the given mean and a fixed dispersion.
+    """Negative binomial counts with the given mean and dispersion (scalar, or broadcast per row).
 
     Parameterised so that ``variance = mean * (1 + mean / dispersion)``. Used for defensive
     actions, where a Poisson understates how often a player has an unusually busy game — and

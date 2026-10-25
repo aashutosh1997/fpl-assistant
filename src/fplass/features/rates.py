@@ -363,6 +363,11 @@ def shrink(
         observed_nineties = (_exposure(totals, column) / 90.0).to_numpy(dtype="float64")
         observed_nineties = np.where(np.isnan(events), 0.0, observed_nineties)
         out[rate] = (alpha + observed_events) / (beta + observed_nineties)
+        if rate == "defcon":
+            # The posterior's shape: how much evidence stands behind the rate. The engine needs it
+            # because DEFCON pays on a threshold, where an uncertain rate and a noisy match both
+            # widen the count and both move the chance of clearing the bar.
+            out["defcon_shape"] = alpha + observed_events
 
     if conversion:
         positions = totals["position"].astype(str)
