@@ -147,8 +147,9 @@ def _free_transfers(history: dict, last_gameweek: int) -> int:
     """Reconstruct banked free transfers from the transfer counts in your history.
 
     FPL does not expose this directly. You gain one per gameweek and may bank up to five, so it can
-    be replayed from how many transfers you made each week. Wildcard and Free Hit weeks are skipped
-    because their transfers are free and do not consume the balance.
+    be replayed from how many transfers you made each week. Wildcard and Free Hit weeks leave the
+    balance exactly as it was: their transfers are free and do not consume it, and the week does
+    not add one either.
 
     **Gameweek 1 is not a gameweek for this purpose.** Everything before the season's first
     deadline is an unlimited squad build — effectively a free wildcard — so it neither spends a
@@ -166,7 +167,9 @@ def _free_transfers(history: dict, last_gameweek: int) -> int:
         if gameweek == FIRST_GAMEWEEK:
             continue
         if chip_weeks.get(gameweek) in {"wildcard", "freehit"}:
-            banked = min(banked + 1, milp.MAX_BANKED_TRANSFERS)
+            # The balance is kept through the chip week but does not grow in it. Crediting one
+            # here made Esteciao's 2026-27 GW8 count 4 where FPL showed 3: a GW3 Wildcard, one
+            # transfer in each of GW4 and GW5, then two rolls.
             continue
         made = int(row.get("event_transfers", 0))
         banked = min(max(banked - made, 0) + 1, milp.MAX_BANKED_TRANSFERS)

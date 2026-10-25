@@ -53,10 +53,16 @@ def test_never_drops_below_one():
     assert _free_transfers(history({1: 0, 2: 5}), 2) == 1
 
 
-def test_wildcard_and_free_hit_do_not_consume_the_balance():
-    """Their transfers are free, so the banked count still accrues that week."""
-    assert _free_transfers(history({1: 0, 2: 0, 3: 8}, {3: "wildcard"}), 3) == 3
-    assert _free_transfers(history({1: 0, 2: 0, 3: 11}, {3: "freehit"}), 3) == 3
+def test_wildcard_and_free_hit_keep_the_balance_without_adding_to_it():
+    """Their transfers are free, so the balance is kept, but the chip week does not grow it."""
+    assert _free_transfers(history({1: 0, 2: 0, 3: 8}, {3: "wildcard"}), 3) == 2
+    assert _free_transfers(history({1: 0, 2: 0, 3: 11}, {3: "freehit"}), 3) == 2
+
+
+def test_a_real_season_with_a_wildcard():
+    """Esteciao, 2026-27: Bench Boost in GW1, Wildcard in GW3, then 1, 1, 0, 0. FPL showed 3."""
+    season = history({1: 0, 2: 1, 3: 0, 4: 1, 5: 1, 6: 0, 7: 0}, {1: "bboost", 3: "wildcard"})
+    assert _free_transfers(season, 7) == 3
 
 
 def test_ignores_gameweeks_after_the_last_played():
