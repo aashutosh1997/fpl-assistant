@@ -77,6 +77,9 @@ DEFAULT_DECAY = 0.0019
 # an unpenalised fit claims.
 DEFAULT_RIDGE = 10.0
 
+# Share of the fitted target taken from expected goals rather than goals; see :func:`fit`.
+DEFAULT_XG_WEIGHT = 0.75
+
 
 @dataclass(slots=True)
 class TeamStrength:
@@ -174,15 +177,32 @@ def load_results(con, *, up_to: pd.Timestamp | None = None) -> pd.DataFrame:
             the model usable inside a backtest: fitting on the full history and then "predicting"
             2021 would be meaningless.
     """
+    # Each side's expected goals is the sum over its players. FPL stored 0.0 rather than null for
+    # the gameweeks before it published xG (2022-23 GW1-15), so a gameweek whose league-wide sum is
+    # nothing has no xG, and those matches keep goals as their only signal.
     results = con.execute(
         """
+        WITH published AS (
+            SELECT season, gw FROM player_gw GROUP BY season, gw HAVING sum(expected_goals) > 0
+        ),
+        side_xg AS (
+            SELECT g.season, g.fixture_id, g.was_home, sum(g.expected_goals) AS xg
+            FROM player_gw g
+            JOIN published p ON p.season = g.season AND p.gw = g.gw
+            GROUP BY g.season, g.fixture_id, g.was_home
+        )
         SELECT
             f.season, f.fixture_id, f.event, f.kickoff_time,
             th.code AS home_code, ta.code AS away_code,
-            f.team_h_score AS home_goals, f.team_a_score AS away_goals
+            f.team_h_score AS home_goals, f.team_a_score AS away_goals,
+            xh.xg AS home_xg, xa.xg AS away_xg
         FROM fixtures f
         JOIN teams th ON th.season = f.season AND th.team_id = f.team_h
         JOIN teams ta ON ta.season = f.season AND ta.team_id = f.team_a
+        LEFT JOIN side_xg xh
+            ON xh.season = f.season AND xh.fixture_id = f.fixture_id AND xh.was_home
+        LEFT JOIN side_xg xa
+            ON xa.season = f.season AND xa.fixture_id = f.fixture_id AND NOT xa.was_home
         WHERE f.team_h_score IS NOT NULL
           AND f.team_a_score IS NOT NULL
           AND th.code IS NOT NULL AND ta.code IS NOT NULL
@@ -308,6 +328,7 @@ def fit(
     decay: float = DEFAULT_DECAY,
     ridge: float = DEFAULT_RIDGE,
     reference_time: pd.Timestamp | None = None,
+    xg_weight: float = DEFAULT_XG_WEIGHT,
 ) -> TeamStrength:
     """Fit attack/defence ratings by weighted maximum likelihood.
 
@@ -316,6 +337,10 @@ def fit(
         decay: Exponential decay per day of match age.
         ridge: L2 penalty on team effects, shrinking sparse teams toward the league mean.
         reference_time: "Now" for the purposes of decay; defaults to the last kickoff.
+        xg_weight: Share of each side's fitted target taken from its expected goals rather than
+            its goals, where xG exists (``home_xg``/``away_xg``). The Poisson log-likelihood is a
+            valid quasi-likelihood for a non-integer target, so the ratings stay goals per match;
+            the Dixon-Coles low-score term is always fitted on the actual score.
     """
     if "home_promoted" not in results.columns:
         results = flag_promoted(results)
@@ -330,6 +355,13 @@ def fit(
     away_idx = results["away_code"].map(index).to_numpy()
     home_goals = results["home_goals"].to_numpy(dtype="float64")
     away_goals = results["away_goals"].to_numpy(dtype="float64")
+    home_target, away_target = home_goals, away_goals
+    if xg_weight > 0 and {"home_xg", "away_xg"} <= set(results.columns):
+        home_xg = pd.to_numeric(results["home_xg"], errors="coerce").to_numpy(dtype="float64")
+        away_xg = pd.to_numeric(results["away_xg"], errors="coerce").to_numpy(dtype="float64")
+        has_xg = ~np.isnan(home_xg) & ~np.isnan(away_xg)
+        home_target = np.where(has_xg, xg_weight * home_xg + (1 - xg_weight) * home_goals, home_goals)
+        away_target = np.where(has_xg, xg_weight * away_xg + (1 - xg_weight) * away_goals, away_goals)
     debutant_attack, debutant_defence = estimate_debutant_prior(results)
     home_promoted = results["home_promoted"].to_numpy(dtype="float64")
     away_promoted = results["away_promoted"].to_numpy(dtype="float64")
@@ -340,7 +372,7 @@ def fit(
 
     # Log-factorial terms are constant in the parameters but keep the reported log-likelihood
     # comparable across different datasets.
-    const = -(gammaln(home_goals + 1) + gammaln(away_goals + 1)) @ weights
+    const = -(gammaln(home_target + 1) + gammaln(away_target + 1)) @ weights
 
     # Parameters: attack (n_teams), defence (n_teams), home advantage, intercept, rho, and the
     # shared promoted-side handicap in attack and defence.
@@ -373,7 +405,7 @@ def fit(
 
         tau = _dixon_coles_tau(home_goals, away_goals, lam_h, lam_a, rho)
         per_match = (
-            home_goals * log_lam_h - lam_h + away_goals * log_lam_a - lam_a + np.log(tau)
+            home_target * log_lam_h - lam_h + away_target * log_lam_a - lam_a + np.log(tau)
         )
         penalty = ridge * (np.sum(attack**2) + np.sum(defence**2))
         return -(per_match @ weights + const) + penalty

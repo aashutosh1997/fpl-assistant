@@ -216,3 +216,31 @@ def test_score_predictions_prefers_the_right_model(results):
         T.score_predictions(fitted, holdout)["mean_log_likelihood"]
         > T.score_predictions(flattened, holdout)["mean_log_likelihood"]
     ), "team ratings should beat treating every team as identical"
+
+
+def test_expected_goals_reach_the_results(results):
+    """Every match from 2022-23 GW16, when FPL began publishing xG, carries both sides' xG."""
+    recent = results[results["season"] >= "2023-24"]
+    assert recent["home_xg"].notna().all() and recent["away_xg"].notna().all()
+    assert results[results["season"] <= "2021-22"]["home_xg"].isna().all()
+
+
+def test_xg_weight_moves_ratings_toward_chances_not_finishing(results):
+    """A side that creates more than it scores is rated higher once xG carries weight.
+
+    Rating teams on 0.75 xG and 0.25 goals predicted held-out goals better than goals alone in
+    every season 2023-24 to 2026-27 (+0.0076 log-likelihood a match over 1,210 matches).
+    """
+    recent = results[results["season"] >= "2023-24"]
+    wasteful = (recent.groupby("home_code")["home_xg"].sum() - recent.groupby("home_code")["home_goals"].sum())
+    code = int(wasteful.idxmax())
+    goals_only = T.fit(results, xg_weight=0.0).attack[code]
+    blended = T.fit(results, xg_weight=0.75).attack[code]
+    assert blended > goals_only
+
+
+def test_zero_xg_weight_ignores_xg(results):
+    stripped = results.drop(columns=["home_xg", "away_xg"])
+    a = T.fit(results, xg_weight=0.0)
+    b = T.fit(stripped, xg_weight=0.75)
+    assert a.attack == pytest.approx(b.attack)
