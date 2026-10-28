@@ -53,7 +53,7 @@ Useful options:
 ```
 
 The 2026/27 API publishes official price-change projections. `data/snapshots/prices/` holds the
-hourly history that calibrates them; if it is thin, the answer falls back to the classical
+daily history that calibrates them; if it is thin, the answer falls back to the classical
 net-transfer model and will say so.
 
 ## How to present the answer

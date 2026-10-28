@@ -1,28 +1,23 @@
 name: price-snapshot
 
-# Snapshots FPL's price-change fields around the clock. The commits themselves are the time
-# series (git-scraper pattern), which also keeps the repo active — GitHub disables scheduled
-# workflows after 60 days of inactivity, and these commits reset that clock.
+# Snapshots FPL's price-change and availability fields once a day. The commits themselves are the
+# time series (git-scraper pattern), which also keeps the repo active — GitHub disables scheduled
+# workflows after 60 days of inactivity in a public repo, and these commits reset that clock for
+# gameweek.yml too.
 #
-# Prices move at 00:00 UK, listed exactly in game_config.settings.price_change_deadlines.
-# We sample every 20 minutes across that window so calibration has a tight pre-move reading,
-# and hourly the rest of the day. GitHub's scheduler drifts by 5-15+ minutes under load, so the
-# dense window is deliberately wider than the event it is trying to bracket.
-# Cadence was cut roughly 60% (from ~34 snapshots a day to ~13) once four days of logging
-# established what the fields do. Prices move once daily at 23:00 UTC, and price_change_percent is
-# a signed progress bar against a threshold of 100 with price_change_hourly_rate giving its
-# derivative — so a reading close to the deadline plus the rate is enough to project the move.
-# Dense sampling through the afternoon was measuring a curve we can already extrapolate.
+# This ran thirteen times a day, densest around the 00:00 UK price change, to train a model of when
+# prices move. GitHub fired about five of the thirteen, one to two hours late, so only 40% of moves
+# were bracketed closely enough to learn from; even so, by 2026-27 GW9 the model had 49 rises and
+# 226 falls and separated them almost perfectly in-sample (AUC 0.999), so more readings add little. What still
+# needs a fresh reading is ownership, which the minutes recalibration fits on, and the
+# availability flags that time the news risk before a deadline. A day's resolution serves both.
+#
+# The run sits after the change in both BST (23:00 UTC) and GMT (00:00 UTC), with room for the
+# scheduler's lag, so consecutive readings bracket exactly one change and a plan run during the day
+# reads the position after the latest change rather than before it.
 on:
   schedule:
-    # Around the change itself: every 30 minutes from 21:00 to 23:59 UTC, so the final
-    # pre-change state is always captured within half an hour.
-    - cron: "11,41 21-23 * * *"
-    # Immediately after, to record what actually changed.
-    - cron: "13 0 * * *"
-    # Every three hours the rest of the day: enough to track the trajectory building through the
-    # day without re-measuring a slope we can compute.
-    - cron: "17 3,6,9,12,15,18 * * *"
+    - cron: "47 0 * * *"
   workflow_dispatch:
 
 concurrency:

@@ -1,10 +1,10 @@
-"""When availability news arrives, timed from the hourly snapshots.
+"""When availability news arrives, timed from the logged snapshots.
 
 The buy-now-or-wait decision in :mod:`fplass.prices.decide` needs the chance that news which
 would change your mind arrives between now and the deadline. It carried a hand-set table by
-days to go. The price logger records every player's status and ``chance_of_playing`` hourly,
-which is exactly the timing data that table was guessing at: for each transfer window, the
-players who were unflagged at its start and the hour at which a flag appeared.
+days to go. The price logger records every player's status and ``chance_of_playing`` daily
+(hourly until 2026-27 GW9), which is exactly the timing data that table was guessing at: for
+each transfer window, the players who were unflagged at its start and when a flag appeared.
 
 Two windows of 2026/27 gave 79 such events among roughly 600 unflagged players a week: 38% in
 the two days before the deadline, 11% in the final day, and a weekly rate near 6.5%, against a

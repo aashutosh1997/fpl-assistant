@@ -535,7 +535,7 @@ def _price_stage(
     except (FileNotFoundError, KeyError) as exc:
         notes.append(
             f"No price snapshot history yet ({exc}); price timing uses the classical "
-            "net-transfer model until the hourly logger has run for a few days."
+            "net-transfer model until the daily logger has run for a few days."
         )
 
     if model is not None:
@@ -571,7 +571,7 @@ def _price_stage(
         risk_table = None
     if risk_table is not None:
         notes.append(
-            "News risk before a deadline is now measured from the hourly snapshots: "
+            "News risk before a deadline is now measured from the logged snapshots: "
             + ", ".join(f"{int(d)}d {float(v):.1%}" for d, v in risk_table.items() if d in (1, 2, 4, 7))
             + " (the built-in table assumed 6%, 11%, 18%, 24%)."
         )
