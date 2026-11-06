@@ -77,6 +77,29 @@ def test_exposure_only_counts_seasons_that_published_the_stat():
     assert row[rates.exposure_column("goals_scored")] > 900.0
 
 
+def test_the_current_season_is_tiered_on_its_own_prices(con):
+    """The live feed stores no price, which left 92 players new to the league with no tier and
+    tiered everyone else on last season's closing price."""
+    season = con.execute("SELECT max(season) FROM players").fetchone()[0]
+    starting = con.execute(
+        "SELECT code, start_cost FROM players WHERE season = ? AND code IS NOT NULL", [season]
+    ).fetchdf()
+    unpriced = con.execute(
+        """
+        SELECT DISTINCT pl.code FROM player_gw_as_of p
+        JOIN players pl ON pl.season = p.season AND pl.element = p.element
+        WHERE p.season = ? AND p.prev_value IS NULL
+        """,
+        [season],
+    ).fetchdf()
+    totals = rates.player_totals(con)
+    current = totals.merge(starting, on="code")
+    assert current["price_tier"].notna().all()
+    affected = current[current["code"].isin(unpriced["code"])]
+    assert len(affected) > 0
+    assert (affected["last_value"] == affected["start_cost"]).all()
+
+
 def test_defender_defcon_rate_matches_last_season(con, rate_table):
     """League-wide, the modelled per-90 must sit near what defenders actually produced."""
     actual = _actual_per_90(con, "2025-26", "DEF")

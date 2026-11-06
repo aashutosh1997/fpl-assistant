@@ -143,6 +143,12 @@ def player_totals(
     # FPL began publishing expected stats in gameweek 16 of 2022-23 and stored 0.0, not null, for
     # the fifteen gameweeks before, which read as a season-long drought of chances for everyone
     # who played then. A gameweek whose league-wide expected goals sum to nothing published none.
+    #
+    # The live feed carries no price, so the current season's rows fall back on the season's
+    # starting price. Without it a player new to the league had no price tier and was shrunk
+    # toward the whole position — Slater, a 4.5m midfielder, toward an average that includes
+    # Salah — and everyone else was tiered on last season's closing price. The ordering makes
+    # "last" the latest gameweek.
     frame = con.execute(
         f"""
         WITH published AS (
@@ -151,7 +157,8 @@ def player_totals(
             GROUP BY season, gw
         )
         SELECT
-            pl.code, p.season, p.gw_seq, p.position, p.minutes, p.prev_value,
+            pl.code, p.season, p.gw_seq, p.position, p.minutes,
+            COALESCE(p.prev_value, pl.start_cost) AS prev_value,
             p.goals_scored, p.assists, p.defcon_count, p.saves, p.yellow_cards, p.bonus,
             CASE WHEN pub.has_expected THEN p.expected_goals END AS expected_goals,
             CASE WHEN pub.has_expected THEN p.expected_assists END AS expected_assists,
@@ -161,6 +168,7 @@ def player_totals(
         JOIN players pl ON pl.season = p.season AND pl.element = p.element
         LEFT JOIN published pub ON pub.season = p.season AND pub.gw = p.gw
         WHERE {" AND ".join(filters)} AND pl.code IS NOT NULL
+        ORDER BY p.season, p.gw_seq
         """,
         params,
     ).fetchdf()

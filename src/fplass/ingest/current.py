@@ -245,6 +245,9 @@ def ingest_live_gameweek(
 
     upsert(con, "teams", _teams_frame(bootstrap, season), ("season", "team_id"))
     upsert(con, "players", _players_frame(bootstrap, season), ("season", "element"))
+    # The scores too: team strength and clean-sheet history read them from the fixtures table,
+    # and without this a played gameweek stayed unscored there until a full `ingest current`.
+    upsert(con, "fixtures", _fixtures_frame(fixtures, season), ("season", "fixture_id"))
 
     fixture_sides: dict[int, dict[int, bool]] = {}
     fixture_opponent: dict[int, dict[int, int]] = {}
