@@ -20,6 +20,36 @@ postponements create double and blank gameweeks.
 
 Run `ingest history` only if `data/warehouse/fpl.duckdb` is missing — it re-downloads every season.
 
+Once a week, after a gameweek has finished (Monday or Tuesday), also refresh the elite-manager
+study. The weekly crawl is about 55,000 requests (about 90 minutes; run it detached) and must run
+locally, because FPL's Cloudflare blocks cloud runners:
+
+```bash
+.venv/bin/python -m fplass.cli ingest gameweek <N>         # the finished gameweek's results
+.venv/bin/python -m fplass.cli ingest market               # prices, ownership, transfers per GW
+.venv/bin/python -m fplass.cli study crawl --incremental   # top managers' histories and transfers
+.venv/bin/python -m fplass.cli study panel --gameweeks 1-38   # the model replayed at each deadline
+.venv/bin/python -m fplass.cli study export --no-raw       # cohort flows, data/snapshots/elite (<1 MB)
+```
+
+The raw tables (`study export` without `--no-raw`, about 18 MB at GW10 and growing) are the only
+copy of the season's manager decisions once FPL wipes them in July. Commit them once a month and
+always at the end of the season, not weekly: there is no Git LFS here, and each re-export adds a
+whole new copy to the history.
+
+## "What are the top managers doing that I'm not?"
+
+```bash
+.venv/bin/python -m fplass.cli study report    # their transfers, the model's verdict, what you missed
+.venv/bin/python -m fplass.cli study signal    # whether their moves predict what the model misses
+```
+
+Read the cohorts honestly. "Top 10k today" is chosen by the results being judged, so its
+transfers always look good; "last season top 10k/50k" and "top 10k at the deadline" are the fair
+comparisons. A cohort consensus the model opposes is worth raising with the user, with the
+reason the report gives (news on the player sold, a player new to the league, minutes, or plain
+returns), but it is not by itself a reason to override the plan.
+
 ## The main question: "what should I do this week?"
 
 ```bash

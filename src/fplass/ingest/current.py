@@ -319,10 +319,116 @@ def ingest_live_gameweek(
     for column in LIVE_STAT_COLUMNS:
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
 
+    frame = _keep_market_columns(con, frame, season)
     written = upsert(con, "player_gw", frame, ("season", "element", "fixture_id"))
     create_as_of_view(con)
     log.info("ingested %d player rows for %s GW%d", written, season, gameweek)
     return written
+
+
+# The market's columns: price, owners and the week's transfers. The live feed has none of them,
+# and they are what the order-flow layer and the price tiers read. See ingest_market_history.
+MARKET_COLUMNS = ("value", "selected", "transfers_in", "transfers_out", "transfers_balance")
+
+
+def _keep_market_columns(con, frame: pd.DataFrame, season: str) -> pd.DataFrame:
+    """Carry already-ingested market columns onto rows about to be re-upserted.
+
+    ``upsert`` replaces whole rows, so re-ingesting a gameweek as its bonus settles would
+    otherwise blank the market history filled in by :func:`ingest_market_history`.
+    """
+    existing = con.execute(
+        f"""
+        SELECT element, fixture_id, {", ".join(MARKET_COLUMNS)}
+        FROM player_gw WHERE season = ?
+        """,
+        [season],
+    ).fetchdf()
+    if existing.empty:
+        return frame
+    frame = frame.drop(columns=[c for c in MARKET_COLUMNS if c in frame.columns])
+    return frame.merge(existing, on=["element", "fixture_id"], how="left")
+
+
+def _market_frame(summaries: dict[int, dict[str, Any]]) -> pd.DataFrame:
+    """One row per (element, fixture) from each player's ``element-summary`` history."""
+    records = [
+        {
+            "element": element,
+            "fixture_id": row.get("fixture"),
+            **{c: row.get(c) for c in MARKET_COLUMNS},
+        }
+        for element, summary in summaries.items()
+        for row in summary.get("history", [])
+        if row.get("fixture") is not None
+    ]
+    frame = pd.DataFrame.from_records(
+        records, columns=["element", "fixture_id", *MARKET_COLUMNS]
+    )
+    for column in ("element", "fixture_id", *MARKET_COLUMNS):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce").astype("Int64")
+    return frame
+
+
+def apply_market_history(con, frame: pd.DataFrame, season: str) -> int:
+    """Write market columns onto existing ``player_gw`` rows, leaving every other column alone.
+
+    An UPDATE rather than :func:`upsert`: the upsert deletes each matching row and inserts only
+    the staged columns, which would blank the match statistics this frame does not carry.
+    """
+    if frame.empty:
+        return 0
+    con.register("_market", frame)
+    try:
+        assignments = ", ".join(f"{c} = m.{c}" for c in MARKET_COLUMNS)
+        updated = con.execute(
+            f"""
+            UPDATE player_gw SET {assignments}
+            FROM _market m
+            WHERE player_gw.season = ? AND player_gw.element = m.element
+              AND player_gw.fixture_id = m.fixture_id
+            """,
+            [season],
+        ).fetchone()[0]
+    finally:
+        con.unregister("_market")
+    create_as_of_view(con)
+    return int(updated)
+
+
+def ingest_market_history(
+    con, client: FPLClient | None = None, season: str = CURRENT_SEASON, *, workers: int = 4
+) -> int:
+    """Fill this season's price, ownership and transfer columns from each player's history.
+
+    The live endpoint records what players did, not what managers did, so for the season being
+    played ``player_gw`` had no ``value``, ``selected`` or ``transfers_in``/``_out``. Without
+    them a replay of this season has no order-flow layer (``flow.historical_flow`` reads them)
+    and no deadline prices, and the current season's price tiers fall back to the starting
+    price. ``element-summary/{id}`` carries all five per fixture: one call a player.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    elements = [
+        int(r[0])
+        for r in con.execute(
+            "SELECT DISTINCT element FROM player_gw WHERE season = ? ORDER BY element", [season]
+        ).fetchall()
+    ]
+    owns_client = client is None
+    client = client or FPLClient()
+    try:
+        # httpx clients are safe to share across threads; a few at once keeps this to a minute.
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            summaries = dict(
+                zip(elements, pool.map(client.element_summary, elements), strict=True)
+            )
+    finally:
+        if owns_client:
+            client.close()
+    updated = apply_market_history(con, _market_frame(summaries), season)
+    log.info("market history: %d player_gw rows updated for %s", updated, season)
+    return updated
 
 
 def chip_windows(con, season: str = CURRENT_SEASON) -> dict[str, list[tuple[int, int]]]:

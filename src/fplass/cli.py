@@ -24,7 +24,11 @@ backtest_app = typer.Typer(
 )
 app.add_typer(prices_app, name="prices")
 app.add_typer(ingest_app, name="ingest")
+study_app = typer.Typer(
+    no_args_is_help=True, help="The top managers' decisions against the model's."
+)
 app.add_typer(backtest_app, name="backtest")
+app.add_typer(study_app, name="study")
 
 
 @app.callback()
@@ -242,6 +246,19 @@ def ingest_gameweek(
     con = connect()
     try:
         typer.echo(f"{ingest_live_gameweek(con, gameweek, season=season):,} player rows")
+    finally:
+        con.close()
+
+
+@ingest_app.command("market")
+def ingest_market(season: str = typer.Option("2026-27", help="Season.")) -> None:
+    """Fill this season's prices, ownership and transfers per gameweek (one call a player)."""
+    from .ingest.current import ingest_market_history
+    from .ingest.warehouse import connect
+
+    con = connect()
+    try:
+        typer.echo(f"{ingest_market_history(con, season=season):,} player rows updated")
     finally:
         con.close()
 
@@ -576,6 +593,149 @@ def backtest_revisions(
         f"\n{len(table):,} player-weeks; a likely starter collapses to a likely absentee by the "
         f"next deadline in {jumps['jump'].mean():.2%} of weeks"
     )
+
+
+
+
+def _me() -> dict:
+    """The advised team from config/me.json, or an empty dict."""
+    import json
+
+    from .paths import CONFIG
+
+    path = CONFIG / "me.json"
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+@study_app.command("crawl")
+def study_crawl(
+    top: int = typer.Option(10_000, help="Read the overall standings down to this rank in full."),
+    band: bool = typer.Option(True, help="Also sample standings pages below the top."),
+    band_to: int = typer.Option(250_000, help="Deepest rank the sampled band reaches."),
+    band_every: int = typer.Option(4, help="Read every n-th standings page in the band."),
+    prior_rank: int = typer.Option(
+        50_000, help="Band managers whose decisions are fetched: last season inside this rank."
+    ),
+    rate: float = typer.Option(10.0, help="Requests a second, across all threads."),
+    workers: int = typer.Option(8, help="Concurrent requests."),
+    stages: str = typer.Option(
+        "standings,history,transfers,picks", help="Comma-separated stages to run."
+    ),
+    incremental: bool = typer.Option(
+        False, help="Weekly refresh: top pages, and only the studied managers' histories."
+    ),
+) -> None:
+    """Collect the top managers' histories, transfers and squads into data/warehouse/managers.duckdb.
+
+    Resumable: each stage skips what it already has for the latest finished gameweek. A full
+    crawl is about 100,000 requests; run it detached. Re-run weekly with --incremental (about
+    40,000 requests) after the gameweek ingest.
+    """
+    from .study.crawl import CrawlConfig, crawl
+
+    me = _me()
+    config = CrawlConfig(
+        top=top,
+        band=band,
+        band_to=band_to,
+        band_every=band_every,
+        prior_rank=prior_rank,
+        leagues=tuple(league["id"] for league in me.get("leagues", [])),
+        me=me.get("entry_id"),
+        rate=rate,
+        workers=workers,
+        stages=tuple(s.strip() for s in stages.split(",") if s.strip()),
+        incremental=incremental,
+    )
+    summary = crawl(config)
+    for key, value in summary.items():
+        typer.echo(f"{key:<20} {value}")
+
+
+def _study_connection(managers_db: str | None):
+    """The warehouse read-only, with the managers database attached beside it."""
+    from .ingest.warehouse import connect
+    from .study.store import MANAGERS_DB, attach_managers
+
+    con = connect(read_only=True)
+    attach_managers(con, managers_db or MANAGERS_DB)
+    return con
+
+
+@study_app.command("panel")
+def study_panel(
+    gameweeks: str = typer.Option("1-38", help="Deadlines to replay, e.g. '1-10'."),
+    draws: int = typer.Option(2000, help="Monte Carlo draws per deadline."),
+    season: str = typer.Option("2026-27", help="Season."),
+) -> None:
+    """Replay this season's deadlines with the current model, into data/panel/study/.
+
+    Kept out of projection_panel, which the live option values and `backtest manager` read.
+    Deadlines not yet reached are skipped. Run `fpl ingest market` first so the replay has
+    this season's prices and order flow.
+    """
+    from .ingest.warehouse import connect
+    from .study.missed import build_study_panel
+
+    con = connect(read_only=True)
+    try:
+        upcoming = con.execute(
+            "SELECT min(event) FROM events WHERE season = ? AND NOT finished", [season]
+        ).fetchone()[0]
+    finally:
+        con.close()
+    chosen = [g for g in (_parse_gameweeks(gameweeks) or []) if upcoming is None or g <= upcoming]
+    typer.echo(build_study_panel(season, chosen, n_draws=draws))
+
+
+@study_app.command("report")
+def study_report(
+    season: str = typer.Option("2026-27", help="Season."),
+    managers_db: str = typer.Option(None, help="A managers database other than the default."),
+) -> None:
+    """What the top managers transferred, whether the model backed it, and what you missed."""
+    from .study import report as report_module
+
+    con = _study_connection(managers_db)
+    try:
+        typer.echo(report_module.build(con, season, _me().get("entry_id")))
+    finally:
+        con.close()
+
+
+@study_app.command("signal")
+def study_signal(
+    season: str = typer.Option("2026-27", help="Season."),
+    managers_db: str = typer.Option(None, help="A managers database other than the default."),
+) -> None:
+    """Whether the top managers' transfers predict the points and minutes the model misses."""
+    from .study import report as report_module
+
+    con = _study_connection(managers_db)
+    try:
+        typer.echo(report_module.build_signal(con, season, _me().get("entry_id")))
+    finally:
+        con.close()
+
+
+@study_app.command("export")
+def study_export(
+    season: str = typer.Option("2026-27", help="Season."),
+    raw: bool = typer.Option(True, help="Also export the raw tables as gzipped CSV."),
+    managers_db: str = typer.Option(None, help="A managers database other than the default."),
+) -> None:
+    """Write cohort flows and the raw decisions under data/snapshots, the copy that outlasts FPL's."""
+    from .study import export as export_module
+
+    con = _study_connection(managers_db)
+    try:
+        last = con.execute("SELECT max(gw) FROM m.manager_gw WHERE season = ?", [season]).fetchone()[0]
+        typer.echo(export_module.export_aggregates(con, season, last))
+        if raw:
+            for path in export_module.export_raw(con, season):
+                typer.echo(path)
+    finally:
+        con.close()
 
 
 if __name__ == "__main__":
