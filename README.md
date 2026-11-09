@@ -285,6 +285,23 @@ season more (SE 23, up in three seasons of nine): level on points, with projecti
 right in total and much closer by position. The engine changes of this pass alone, both on banked 2.0, are worth 26 a
 season over the first pass (SE 27, six seasons of nine).
 
+A flat price values a fifth banked transfer as highly as the first, so a declining one was tried
+next (`banked_transfer_decay`): the first keeps its 3.0 and each further one is worth a fixed
+fraction of the one before. Replayed against the flat 3.0 on the same pool (which reproduced its
+2,275), every schedule lost:
+
+| panel.5 | Points a season | Against flat | Hits a season | Weeks with 2+ moves | Rolls |
+|---|---|---|---|---|---|
+| **Flat 3.0** | **2,275** | | 3.3 | 16% | 18% |
+| Decay 0.75 (3, 2.25, 1.7, 1.3, 0.9) | 2,227 | −48 (SE 25, up in 3 of 9) | 12.1 | 39% | 34% |
+| Decay 0.5 (3, 1.5, 0.75, 0.4, 0.2) | 2,222 | −53 (SE 31, 3 of 9) | 21.7 | 49% | 30% |
+| Decay 0.25 (3, 0.75, 0.2, 0.05, 0) | 2,206 | −69 (SE 37, 2 of 9) | 23.1 | 52% | 21% |
+
+A cheaper stockpile is not spent more evenly. The first transfer still costs 3.0 to use, the
+second much less, so the planner banks one and then moves two or three at once: under 0.75 the
+single-move weeks fall from 197 to 81 of 298 and the weeks with a hit rise from 9 to 46. The flat
+price is a brake on chasing projected gains that do not hold, and stays; the knob is left at 1.0.
+
 What is left of the defender bias is no longer the within-team split. Likely-starting defenders
 play an hour less often than predicted (57.5% against a predicted 64% in the middle band, 80%
 against 85% above it) while the other positions are calibrated, and the team model predicts

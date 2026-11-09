@@ -535,3 +535,53 @@ def test_distinct_plans_differ_now_and_always_include_a_roll(points, universe, w
 
 
 # ------------------------------------------------------- a price per banked transfer
+
+
+def test_a_flat_schedule_is_the_flat_price(points, universe, windows):
+    held = _held(points, universe, windows, free_transfers=3)
+    flat = solve_scenario(points, universe, held, windows, allow_chips=False)
+    scheduled = solve_scenario(
+        points, universe, held, windows, allow_chips=False,
+        banked_transfer_values=(DEFAULT_BANKED_TRANSFER_VALUE,) * MAX_BANKED_TRANSFERS,
+    )
+    assert scheduled.objective == pytest.approx(flat.objective, abs=1e-4)
+
+
+def test_a_rising_schedule_is_refused(points, universe, windows):
+    held = _held(points, universe, windows)
+    with pytest.raises(ValueError, match="must not increase"):
+        solve_scenario(
+            points, universe, held, windows, allow_chips=False,
+            banked_transfer_values=(1.0, 2.0, 3.0),
+        )
+
+
+def test_a_falling_schedule_spends_a_stockpile_the_flat_price_hoards(points, universe, windows):
+    """Holding five, a flat price charges each transfer spent for every week it is not rebuilt;
+    when only the first banked transfer is worth anything, worthwhile swaps get made now."""
+    held = _held(points, universe, windows, free_transfers=MAX_BANKED_TRANSFERS)
+    # Make three outsiders, one per position and club, modestly better than the incumbents.
+    boosted = points.copy()
+    position = universe.set_index("element")["position"]
+    club = universe.set_index("element")["team_id"]
+    owned_clubs = club.loc[list(held.elements)].value_counts()
+    picked: list[int] = []
+    for pos in ("DEF", "MID", "FWD"):
+        pool = [
+            e for e in universe["element"]
+            if e not in held.elements and position[e] == pos
+            and owned_clubs.get(club[e], 0) < CLUB_LIMIT - 1
+            and club[e] not in {club[p] for p in picked}
+        ]
+        cheapest = min(pool, key=lambda e: universe.set_index("element").at[e, "price"])
+        picked.append(cheapest)
+        best_owned = boosted.loc[[o for o in held.elements if position[o] == pos]].max()
+        boosted.loc[cheapest] = best_owned + 1.5
+
+    def moves(**kwargs) -> int:
+        plan = solve_scenario(boosted, universe, held, windows, allow_chips=False, **kwargs)
+        return len(plan.transfers_in[GAMEWEEKS[0]])
+
+    flat = moves()
+    falling = moves(banked_transfer_values=(DEFAULT_BANKED_TRANSFER_VALUE, 0.0, 0.0, 0.0, 0.0))
+    assert falling > flat

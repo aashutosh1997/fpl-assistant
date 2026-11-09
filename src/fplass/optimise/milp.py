@@ -32,6 +32,7 @@ doing nothing, and only a multi-week formulation can see that.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -287,6 +288,7 @@ def solve(
     gameweeks: list[int] | None = None,
     bench_weight: float = DEFAULT_BENCH_WEIGHT,
     banked_transfer_value: float = DEFAULT_BANKED_TRANSFER_VALUE,
+    banked_transfer_values: Sequence[float] | None = None,
     allow_chips: bool = True,
     chip_schedule: dict[int, str] | None = None,
     forbidden: list[dict] | None = None,
@@ -317,6 +319,11 @@ def solve(
             pointless sideways moves. A banked transfer genuinely is worth something: it is the
             option to react to an injury next week. Pricing it also makes "roll your transfer" an
             answer the model can actually give, which is frequently the correct advice.
+        banked_transfer_values: The same price per week, but one value for each banked transfer
+            in turn — the first held, the second, up to the cap — in place of the flat
+            ``banked_transfer_value``. They must not increase: a fifth banked transfer is
+            rarely worth what the first is, since few weeks need five moves, and a flat price
+            values a stockpile that is never spent as highly as the transfer that is.
         allow_chips: Set ``False`` to plan transfers only.
         chip_schedule: Pin chips to specific gameweeks, as ``{gameweek: chip}``. Chips not
             mentioned are forbidden inside this horizon. This is how a whole-season chip roadmap
@@ -619,10 +626,15 @@ def solve(
         )
         contributions.append(terminal_bank_value * final_bank)
 
+    if banked_transfer_values is None:
+        banked = banked_transfer_value * pulp.lpSum(free_transfers[gw] for gw in gameweeks)
+    else:
+        banked = _banked_schedule(problem, free_transfers, gameweeks, banked_transfer_values)
+
     problem += (
         pulp.lpSum(contributions)
         - HIT_COST * pulp.lpSum(hits[gw] for gw in gameweeks)
-        + banked_transfer_value * pulp.lpSum(free_transfers[gw] for gw in gameweeks)
+        + banked
     )
 
     # No-good cuts, so repeated calls yield genuinely different plans rather than the same one.
@@ -659,6 +671,30 @@ def solve(
         fh_lineup,
         chip_play,
         points,
+    )
+
+
+def _banked_schedule(problem, free_transfers, gameweeks, values: Sequence[float]):
+    """The value of the transfers banked each week, one price per transfer held, in order.
+
+    Each week's count is split into unit steps, the j-th worth ``values[j]``. Because the values
+    do not increase, a maximiser fills the steps in order without needing an integer for each,
+    so this is the concave piecewise-linear value of the count at the cost of a few continuous
+    variables.
+    """
+    marginal = [float(v) for v in values][:MAX_BANKED_TRANSFERS]
+    if any(later > earlier + 1e-12 for earlier, later in zip(marginal, marginal[1:])):
+        raise ValueError(f"banked_transfer_values must not increase: {marginal}")
+    steps = pulp.LpVariable.dicts(
+        "ft_step",
+        ((gw, j) for gw in gameweeks for j in range(len(marginal))),
+        lowBound=0,
+        upBound=1,
+    )
+    for gw in gameweeks:
+        problem += pulp.lpSum(steps[gw, j] for j in range(len(marginal))) <= free_transfers[gw]
+    return pulp.lpSum(
+        marginal[j] * steps[gw, j] for gw in gameweeks for j in range(len(marginal))
     )
 
 

@@ -212,3 +212,13 @@ def test_policy_config_parses_and_splits_the_horizon():
     assert terminal.loc[1] == 0.5 * (7 + 8 + 9 + 10), "four weeks beyond the horizon, halved"
     inside, terminal = manager.split_horizon(expected, manager.PolicyConfig())
     assert list(inside.columns) == [5, 6, 7, 8, 9, 10, 11] and terminal is None
+
+
+def test_a_banked_transfer_decay_prices_each_held_transfer_in_turn():
+    config = manager.PolicyConfig.parse("banked_transfer_decay=0.5")
+    assert config.banked_transfer_schedule() == pytest.approx((3.0, 1.5, 0.75, 0.375, 0.1875))
+    assert config.solve_options()["banked_transfer_values"] == config.banked_transfer_schedule()
+    assert "banked_transfer_decay=0.5" in config.tag()
+    # The default keeps the flat price, and its run files keep their name.
+    assert manager.PolicyConfig().banked_transfer_schedule() is None
+    assert manager.PolicyConfig().solve_options()["banked_transfer_values"] is None

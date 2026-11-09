@@ -32,6 +32,10 @@ class PolicyConfig:
     horizon: int = 8
     bench_weight: float = milp.DEFAULT_BENCH_WEIGHT
     banked_transfer_value: float = milp.DEFAULT_BANKED_TRANSFER_VALUE
+    # Each further banked transfer is worth this fraction of the one before: the j-th held is
+    # priced at banked_transfer_value * decay**(j-1) a week. 1.0 is the flat price; 0.75, 0.5
+    # and 0.25 each lost 48-69 points a season to it on panel.5, with 4-7 times the hits.
+    banked_transfer_decay: float = 1.0
     terminal_beta: float = 0.0  # share of the projection beyond the horizon credited at its end
     terminal_bank_value: float = 0.0  # points per 0.1m left in the bank at the horizon's end
     chip_floors: dict[str, float] | None = None  # None: the roadmap's defaults
@@ -77,15 +81,25 @@ class PolicyConfig:
         return {
             "bench_weight": self.bench_weight,
             "banked_transfer_value": self.banked_transfer_value,
+            "banked_transfer_values": self.banked_transfer_schedule(),
             "terminal_bank_value": self.terminal_bank_value,
         }
+
+    def banked_transfer_schedule(self) -> tuple[float, ...] | None:
+        """The price of each banked transfer in turn, or None for the flat price."""
+        if self.banked_transfer_decay == 1.0:
+            return None
+        return tuple(
+            self.banked_transfer_value * self.banked_transfer_decay**j
+            for j in range(milp.MAX_BANKED_TRANSFERS)
+        )
 
     def tag(self) -> str:
         """A short label for output files: only the knobs that differ from the defaults."""
         default = PolicyConfig()
         parts = []
-        for name in ("horizon", "bench_weight", "banked_transfer_value", "terminal_beta",
-                     "terminal_bank_value"):
+        for name in ("horizon", "bench_weight", "banked_transfer_value", "banked_transfer_decay",
+                     "terminal_beta", "terminal_bank_value"):
             if getattr(self, name) != getattr(default, name):
                 parts.append(f"{name}={getattr(self, name)}")
         if self.chip_floors:
