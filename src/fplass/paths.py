@@ -25,6 +25,8 @@ BACKTEST = DATA / "backtest"
 # the replayed seasons that the continuation-rule thresholds are fitted from.
 MEASURED = DATA / "measured"
 MEASURED_CHIP_GAINS = MEASURED / "chip_gains.csv"
+# The reinforcement-learning policy: cached season tables, collected transitions, fitted models.
+RL = DATA / "rl"
 
 
 def ensure_dirs() -> None:

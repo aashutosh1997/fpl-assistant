@@ -291,6 +291,7 @@ def solve(
     chip_schedule: dict[int, str] | None = None,
     forbidden: list[dict] | None = None,
     lock: dict[int, list[int]] | None = None,
+    transfers: dict[int, int] | None = None,
     terminal_value: pd.Series | None = None,
     terminal_bank_value: float = 0.0,
     time_limit: int = 120,
@@ -328,6 +329,10 @@ def solve(
             inflated points, which also makes him captain and distorts the rest of the squad.
         forbidden: Previously found solutions to exclude, so the solver can be called repeatedly
             to build a pool of distinct near-optimal plans for the league-aware stage.
+        transfers: Exactly how many transfers to make in given gameweeks, as
+            ``{gameweek: count}``. For a policy that decides how many moves to make (roll,
+            one, two, a hit) and leaves the solver to choose which; ignored in a gameweek
+            under a wildcard or free hit, whose transfers are outside the economy.
         terminal_value: Points credited for each player owned in the final gameweek of the
             horizon, indexed by element. Without it the horizon is a cliff: a player who
             scores nothing after its last week is worth nothing to hold, so the last weeks of
@@ -535,6 +540,11 @@ def solve(
         # every transfer that week was outside the economy, so it churned the real squad for
         # nothing while the free-hit squad played.
         problem += made <= SQUAD_SIZE * (1 - free_hit)
+
+        if transfers and gw in transfers:
+            count = int(transfers[gw])
+            problem += made >= count - SQUAD_SIZE * unlimited
+            problem += made <= count + SQUAD_SIZE * unlimited
 
         # One chip per gameweek.
         if allow_chips:

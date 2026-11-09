@@ -296,6 +296,57 @@ the base minutes model — a logistic on its log-odds and the two flows — impr
 Brier score in all ten seasons by 2–4.5%, with coefficients stable to two decimals across
 seasons. It is applied to the deadline's own gameweek, in the replay and live.
 
+### A learned policy, tested and not adopted
+
+`fpl rl` tests whether a policy learned from the nine seasons makes two of the planner's
+decisions better than its fixed constants do: how many transfers to make (rolling, or taking
+hits) and when to play each chip. At each deadline the learner picks one of 14 actions:
+- 0 to 3 transfers, with or without a Bench Boost or a Triple Captain;
+- a Wildcard;
+- a Free Hit.
+
+The existing code picks the players.
+
+- **Training** runs in a fast copy of the paper manager, about a second a season. The planner's
+  solver takes nine seconds a gameweek. The copy:
+  - makes greedy swaps from `swap_gains`;
+  - uses a one-week solve for a Wildcard or Free Hit;
+  - scores with the game's rules.
+- **The learner** is fitted Q-iteration with gradient-boosted trees. It is trained on 1,260
+  seasons, then one more round on its own play. The 1,260 seasons were played by:
+  - randomised versions of the planner's thresholds;
+  - a policy cloned from 3,000 top managers' 2026-27 decisions;
+  - random play.
+- **The test** plays each season with a learner that never saw it. The solver is held to the
+  learner's transfer count and chip each week, scored by `execute_gameweek`, and paired against
+  the planner season by season.
+
+| panel.5, carried out by the solver | Points a season | vs the planner | Seasons up |
+|---|---|---|---|
+| Planner | 2,275 | | |
+| The planner's thresholds as rules | 2,207 | −68 (SE 26) | 2 of 9 |
+| Learned, rewarded with projected points | 2,163 | −112 (SE 38) | 1 of 9 |
+
+It loses, by more than the noise floor.
+- **Learning from the points actually scored failed even in the fast copy.** It came in 16 a
+  season below the rules there, because 60–100 points of luck in a season swamp these decisions.
+- **The learner rewarded with projected points beat the rules in the fast copy but lost when
+  the solver carried out its choices.** It was 22 a season ahead of the rules in the fast copy
+  (SE 28) and 44 behind them on the solver. The fast copy's greedy swaps rank decisions
+  differently from the solver.
+- **What it learned is the wrong shape:**
+  - it plays the Triple Captain in GW1 every season;
+  - it makes a transfer nearly every week;
+  - it plays most of its second-half chips by GW24, where the planner keeps them for the run-in
+    (GW33–38).
+
+  The second half alone costs it 39 projected points.
+- **The rules lose through hits:** 20 a season, against the planner's 3.
+
+The planner's decisions stay as they are. The top managers' choices are no better a guide: a
+classifier fitted to them predicts their GW10 action 46% of the time, against 49% for always
+guessing their most common one.
+
 ## Known limitations
 
 Stated because they affect how much to trust an answer, not buried:
@@ -331,6 +382,8 @@ src/fplass/
   optimise/         transfer MILP, chip roadmap, mini-league objective
   options/          what flexibility is worth: revisions, transfer/bank/bench values, chip timing, news risk
   backtest/         the projection panel, the paper manager, live calibration
+  study/            the top managers' crawl, cohorts, missed transfers, the cohort signal
+  rl/               the learned transfer-count and chip policy (tested, not adopted)
   prices/           snapshots, calibration, buy-now-or-wait
   report/           the HTML dashboard published as an Artifact
   advise.py         the pipeline behind `fpl plan`

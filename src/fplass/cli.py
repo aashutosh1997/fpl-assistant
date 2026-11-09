@@ -27,8 +27,13 @@ app.add_typer(ingest_app, name="ingest")
 study_app = typer.Typer(
     no_args_is_help=True, help="The top managers' decisions against the model's."
 )
+rl_app = typer.Typer(
+    no_args_is_help=True,
+    help="A learned policy for transfer counts and chips, judged by the nine-season replay.",
+)
 app.add_typer(backtest_app, name="backtest")
 app.add_typer(study_app, name="study")
+app.add_typer(rl_app, name="rl")
 
 
 @app.callback()
@@ -736,6 +741,150 @@ def study_export(
                 typer.echo(path)
     finally:
         con.close()
+
+
+# ------------------------------------------------------------------ reinforcement learning
+
+
+def _rl_seasons(seasons: str | None) -> list[str]:
+    from .rl.season import REPLAY_SEASONS
+
+    return [s.strip() for s in seasons.split(",")] if seasons else list(REPLAY_SEASONS)
+
+
+@rl_app.command("cache")
+def rl_cache(
+    seasons: str = typer.Option(None, help="Comma-separated seasons (default: the nine replayed)."),
+    refresh: bool = typer.Option(False, help="Rebuild even if cached."),
+) -> None:
+    """Read each season's deadlines, prices, outcomes and opening squad into the RL cache."""
+    from .ingest.warehouse import connect
+    from .rl import season as season_module
+
+    con = connect(read_only=True)
+    try:
+        for season in _rl_seasons(seasons):
+            data = season_module.load(con, season, refresh=refresh)
+            typer.echo(f"{season}: {len(data.deadlines)} deadlines, opening squad bank {data.start_bank / 10:.1f}m")
+    finally:
+        con.close()
+
+
+@rl_app.command("elite")
+def rl_elite(
+    managers: int = typer.Option(3000, help="Managers sampled from the fair cohorts."),
+    workers: int = typer.Option(6, help="Worker processes."),
+    season: str = typer.Option("2026-27", help="Season of the crawl."),
+    managers_db: str = typer.Option(None, help="A managers database other than the default."),
+) -> None:
+    """Clone the top managers' roll, hit and chip decisions into a policy."""
+    from .rl import elite
+
+    con = _study_connection(managers_db)
+    try:
+        states = elite.build_states(con, season, managers=managers, workers=workers)
+    finally:
+        con.close()
+    _, report = elite.fit(states)
+    typer.echo(
+        f"{int(report['states']):,} states. GW{int(report['held_out_gw'])} predicted from the earlier "
+        f"deadlines: {report['accuracy']:.1%} of choices (always the commonest: {report['majority']:.1%})"
+    )
+    shares = elite.describe(states)
+    typer.echo("Choices by deadline (transfers, +chip), weighted:")
+    typer.echo((shares[[c for c in shares.columns if shares[c].max() >= 0.02]] * 100).round(1).to_string())
+
+
+@rl_app.command("collect")
+def rl_collect(
+    rule: int = typer.Option(60, help="Seasons per season, rule with random thresholds, 10% random."),
+    rule30: int = typer.Option(40, help="... with 30% random actions."),
+    elite_seasons: int = typer.Option(30, "--elite", help="... the cloned top managers, 15% random."),
+    random: int = typer.Option(10, help="... uniformly random legal actions."),
+    seasons: str = typer.Option(None, help="Comma-separated seasons."),
+    workers: int = typer.Option(6, help="Worker processes."),
+    seed: int = typer.Option(0, help="Random seed."),
+) -> None:
+    """Play seasons in the fast environment and store every deadline as a transition."""
+    from .rl import elite, fqi
+
+    plan = {"rule": rule, "rule30": rule30, "random": random}
+    models = {}
+    if elite_seasons and elite.MODEL.exists():
+        plan["model:elite"] = elite_seasons
+        models["elite"] = elite.MODEL
+    data = fqi.collect(_rl_seasons(seasons), {k: v for k, v in plan.items() if v}, models=models,
+                       workers=workers, seed=seed)
+    path = fqi.TRANSITIONS / "base.npz"
+    data.save(path)
+    typer.echo(f"{len(data):,} transitions -> {path}")
+
+
+def _rl_table(totals, order: list[str]) -> str:
+    table = totals.pivot(index="season", columns="policy", values="points")
+    table = table[[c for c in order if c in table.columns]]
+    lines = [table.to_string(), "", "mean  " + "  ".join(f"{c}={table[c].mean():,.0f}" for c in table.columns)]
+    return "\n".join(lines)
+
+
+@rl_app.command("train")
+def rl_train(
+    reward: str = typer.Option("actual", help="'actual' points or the projection's 'expected'."),
+    iterations: int = typer.Option(8, help="Fitted Q-iterations per fit."),
+    rounds: int = typer.Option(1, help="Refinement rounds with each fold's own policy."),
+    refine: int = typer.Option(12, help="Seasons per training season in each refinement round."),
+    seasons: str = typer.Option(None, help="Comma-separated seasons."),
+    workers: int = typer.Option(6, help="Worker processes."),
+) -> None:
+    """Fit one policy per held-out season and play each on the season it never saw."""
+    from .rl import elite, fqi
+
+    names = _rl_seasons(seasons)
+    base = fqi.Transitions.load(fqi.TRANSITIONS / "base.npz")
+    models = {"elite": elite.MODEL} if elite.MODEL.exists() else {}
+    paths = fqi.train_folds(base, names, reward=reward, iterations=iterations, rounds=rounds,
+                            refine_episodes=refine, workers=workers, models=models)
+    name = f"rl-{reward}"
+    entries = [(s, name, paths[s]) for s in names] + [(s, "rule", None) for s in names]
+    if elite.MODEL.exists():
+        entries += [(s, "elite", elite.MODEL) for s in names]
+    traces = fqi.evaluate(entries, workers=workers)
+    out = fqi.MODELS / reward / "evaluation.csv"
+    traces.to_csv(out, index=False)
+    totals = fqi.season_totals(traces)
+    typer.echo("Fast environment, each season played by a policy that never saw it (points):")
+    typer.echo(_rl_table(totals, [name, "rule", "elite"]))
+    for against in ("rule", "elite"):
+        row = fqi.paired(totals, name, against)
+        if row:
+            typer.echo(f"{name} vs {against}: {row['diff']:+.0f} a season (SE {row['se']:.0f}), "
+                       f"up in {row['up']} of {row['seasons']}")
+    typer.echo(totals[totals["policy"] == name][["season", "hits", "transfers", "chips"]].to_string(index=False))
+    typer.echo(f"Traces: {out}")
+
+
+@rl_app.command("replay")
+def rl_replay(
+    policy: str = typer.Option("rl-actual", help="'rl-actual', 'rl-expected', 'rule' or 'elite'."),
+    seasons: str = typer.Option(None, help="Comma-separated seasons."),
+    workers: int = typer.Option(6, help="Worker processes."),
+) -> None:
+    """The policy's choices executed by the planner's solver, paired against the planner."""
+    from .rl import elite, fqi, replay
+
+    names = _rl_seasons(seasons)
+    if policy.startswith("rl-"):
+        reward = policy.split("-", 1)[1]
+        specs = {s: (policy, str(fqi.model_path(reward, s))) for s in names}
+    elif policy == "elite":
+        specs = {s: ("elite", str(elite.MODEL)) for s in names}
+    else:
+        specs = {s: ("rule", None) for s in names}
+    table = replay.replay_seasons(specs, workers=workers)
+    typer.echo(table[["season", "points", "hits", "transfers", "chips"]].to_string(index=False))
+    row = replay.against_planner(table)
+    typer.echo(f"{policy}: {row['ours']:,.0f} a season against the planner's {row['planner']:,.0f}: "
+               f"{row['diff']:+.0f} (SE {row['se']:.0f}), up in {row['up']} of {row['seasons']}")
 
 
 if __name__ == "__main__":
