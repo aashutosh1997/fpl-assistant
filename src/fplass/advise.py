@@ -7,10 +7,11 @@ the order the decisions actually depend on each other:
 2. Simulate the horizon, giving joint point samples for every player.
 3. Value the chips across the whole remaining season and fix a roadmap, so the transfer solver
    cannot burn them for short-horizon gain.
-4. Generate a pool of near-optimal transfer plans under that roadmap.
-5. Re-score the pool against simulated mini-league rivals and pick the one that most improves your
-   league position, which is usually — but not always — the same as the one that scores most.
-6. Decide, for each recommended transfer, whether to execute now or wait for team news.
+4. Generate a pool of plans under that roadmap, each a different decision for the coming week.
+5. Re-score the pool against simulated mini-league rivals and rank it, so the manager sees the
+   best few options and how close the call is rather than a single answer
+   (:mod:`fplass.optimise.alternatives`).
+6. Decide, for each transfer the options make this week, whether to execute now or wait for news.
 
 Each stage is separately testable and separately inspectable, and the returned object carries the
 intermediate results so a recommendation can be interrogated rather than merely accepted.
@@ -31,6 +32,7 @@ from .ingest.sources import CURRENT_SEASON
 from .options import news as news_module
 from .options import revisions as revisions_module
 from .options import value as value_module
+from .optimise import alternatives as alternatives_module
 from .optimise import chips as chips_module
 from .optimise import league as league_module
 from .optimise import milp
@@ -43,7 +45,13 @@ log = logging.getLogger(__name__)
 
 DEFAULT_HORIZON = 8
 DEFAULT_DRAWS = 10_000
-PLAN_POOL_SIZE = 6
+# Candidate plans solved, each a different squad for the coming week; a roll is added on top
+# when none of them rolls.
+PLAN_POOL_SIZE = 8
+# Ranked options shown to the manager.
+DEFAULT_OPTIONS = 5
+# Revised projections the options are re-scored under for their robustness.
+ROBUSTNESS_REVISIONS = 300
 
 # Everything before this gameweek's deadline is an unlimited squad build, not a transfer week.
 FIRST_GAMEWEEK = 1
@@ -74,17 +82,42 @@ class Recommendation:
     # What flexibility is worth to this squad this week, from sampled next weeks; None until
     # the projection panel exists to sample from.
     option_values: value_module.OptionValues | None = None
+    # The ranked alternatives, best first; ``plan`` is the first of them.
+    options: list[alternatives_module.PlanOption] = field(default_factory=list)
+    # How close each chip still held is to being worth playing (see alternatives.chip_calls).
+    chip_calls: pd.DataFrame | None = None
+    objective: str = "league"
+    league_name: str | None = None
+    free_transfers: int = 1
 
     def transfer_summary(self) -> str:
         names = dict(zip(self.players["element"], self.players["web_name"], strict=True))
-        gw = self.gameweek
-        out = [names.get(e, str(e)) for e in self.plan.transfers_out.get(gw, [])]
-        into = [names.get(e, str(e)) for e in self.plan.transfers_in.get(gw, [])]
-        if not into and not out:
+        summary = move_summary(self.plan, self.gameweek, names, self.free_transfers)
+        if summary.startswith("Roll"):
             return "Roll your transfer — nothing clears the bar this week."
-        hit = self.plan.hits.get(gw, 0)
-        cost = f" (-{hit * 4} pts)" if hit else ""
-        return f"{', '.join(out)} -> {', '.join(into)}{cost}"
+        return summary
+
+
+def move_summary(
+    plan: milp.Plan, gameweek: int, names: dict[int, str], free_transfers: int
+) -> str:
+    """This week's decision in a plan, in one line: the moves and any hit, or the roll."""
+    chip = plan.chips.get(gameweek)
+    label = f" [{chips_module.CHIP_LABELS.get(chip, chip)}]" if chip else ""
+    out = [names.get(e, str(e)) for e in plan.transfers_out.get(gameweek, [])]
+    into = [names.get(e, str(e)) for e in plan.transfers_in.get(gameweek, [])]
+    if chip == "freehit":
+        return f"Free Hit — a one-week squad, then yours returns{label}"
+    if not into and not out:
+        if chip == "wildcard":
+            return f"Keep the squad{label}"
+        if free_transfers >= milp.MAX_BANKED_TRANSFERS:
+            cap = milp.MAX_BANKED_TRANSFERS
+            return f"Roll — already at {cap} free transfers, so one is lost{label}"
+        return f"Roll — {free_transfers + 1} free transfers next week{label}"
+    hit = plan.hits.get(gameweek, 0)
+    cost = f" (-{hit * int(milp.HIT_COST)})" if hit else ""
+    return f"{', '.join(out)} -> {', '.join(into)}{cost}{label}"
 
 
 def load_squad_state(
@@ -191,6 +224,7 @@ def advise(
     price_snapshots: pd.DataFrame | None = None,
     solver_time_limit: int = 120,
     config: PolicyConfig | None = None,
+    n_options: int = DEFAULT_OPTIONS,
 ) -> Recommendation:
     """Produce a full weekly recommendation. See the module docstring for the stages.
 
@@ -198,6 +232,8 @@ def advise(
         config: The planner's knobs — bench weight, banked transfer value, terminal value, chip
             rule. Defaults to the values the ten-season replay has earned; the same object the
             replay runs, so what is measured is what is played.
+        n_options: How many ranked options to return (roll is added as a reference when it
+            falls outside them).
     """
     notes: list[str] = []
     config = config or PolicyConfig()
@@ -246,6 +282,7 @@ def advise(
     gameweeks = np.array(list(expected_points.columns))
 
     windows = milp.ChipWindows.from_warehouse(con, season)
+    chip_floors = config.thresholds(windows, season)
 
     # ---- 3. chip roadmap, decided over the season rather than the horizon
     baseline = milp.solve(
@@ -267,59 +304,95 @@ def advise(
         baseline,
         windows,
         season,
-        min_gain=config.thresholds(windows, season),
+        min_gain=chip_floors,
         solve_options=options,
     )
     notes.extend(roadmap.notes)
 
-    # ---- 4. a pool of near-optimal plans under that roadmap
-    plans: list[milp.Plan] = []
-    forbidden: list[dict] = []
-    for _ in range(PLAN_POOL_SIZE):
-        plan = milp.solve(
+    # ---- 4. a pool of plans under that roadmap, each a different decision this week
+    def solve_candidate(**extra) -> milp.Plan:
+        return milp.solve(
             expected_points,
             players,
             squad,
             windows,
             chip_schedule=roadmap.schedule,
-            forbidden=forbidden,
             time_limit=solver_time_limit,
             **options,
+            **extra,
         )
-        if plan.status not in {"Optimal", "Not Solved"}:
-            break
-        plans.append(plan)
-        forbidden.append({gw: plan.squads[gw] for gw in plan.squads})
-    if not plans:
-        plans = [baseline]
 
-    # ---- 5. pick under the mini-league objective
-    if league_state is not None and league_state.rivals:
+    plans = alternatives_module.distinct_plans(
+        solve_candidate,
+        target_gameweek,
+        squad,
+        pool_size=PLAN_POOL_SIZE,
+        chip=roadmap.schedule.get(target_gameweek),
+    ) or [baseline]
+
+    # ---- 5. rank the pool, under the mini-league objective when there is a league
+    p_full = (
+        player_matches[player_matches["event"] == target_gameweek]
+        .groupby("element")["p_full_base"]
+        .max()
+    )
+    sampler = _revision_sampler(con)
+    projections, projection_elements = _revised_projections(
+        sampler, plans, expected_points, p_full, players
+    )
+    rival_totals = None
+    against_rivals = league_state is not None and bool(league_state.rivals)
+    if against_rivals:
         ownership = players.set_index("element")["selected_by_percent"].fillna(0.0)
         rival_totals = league_module.simulate_rivals(
             league_state, samples, result.elements, players, ownership
         )
-        chosen, comparison = league_module.choose(
-            plans, league_state, rival_totals, samples, result.elements, objective=objective
+    ranked = alternatives_module.rank(
+        plans,
+        samples,
+        result.elements,
+        target_gameweek,
+        league=league_state,
+        rival_totals=rival_totals,
+        objective=objective,
+        projections=projections,
+        projection_elements=projection_elements,
+        n_show=n_options,
+    )
+    chosen = ranked[0].plan
+    names = dict(zip(players["element"], players["web_name"], strict=True))
+    comparison = pd.DataFrame(
+        [
+            {
+                "rank": o.rank,
+                "move": move_summary(o.plan, target_gameweek, names, squad.free_transfers),
+                "reference": o.reference,
+                "tags": ",".join(o.tags),
+                **o.metrics,
+            }
+            for o in ranked
+        ]
+    )
+    if against_rivals:
+        metrics = league_module.evaluate(
+            chosen, league_state, rival_totals, samples, result.elements
         )
-        metrics = league_module.evaluate(chosen, league_state, rival_totals, samples, result.elements)
         notes.append(_league_note(league_state, metrics))
     else:
-        chosen = plans[0]
-        comparison = pd.DataFrame(
-            [{"plan": i, "expected_points": p.objective} for i, p in enumerate(plans)]
-        )
-        metrics = {"expected_points": float(chosen.objective)}
+        metrics = {"expected_points": float(ranked[0].metrics["expected_points"])}
         if league_id is None:
             notes.append(
                 "No league given, so this maximises expected points. Pass a league id to optimise "
                 "for finishing above your rivals instead, which can favour different picks."
             )
+    calls = alternatives_module.chip_calls(
+        roadmap.valuations, chip_floors, target_gameweek, squad.chips_used, roadmap.schedule
+    )
 
-    # ---- 6. price timing for the recommended transfers
+    # ---- 6. price timing for every transfer the options make this week
     price_advice, sells, buys = _price_stage(
         con,
-        chosen,
+        [o.plan for o in ranked],
         players,
         squad,
         target_gameweek,
@@ -332,10 +405,11 @@ def advise(
         options,
     )
 
-    notes.extend(_minutes_risk_notes(chosen, player_matches, players, target_gameweek))
-    notes.extend(_flow_notes(chosen, player_matches, players, target_gameweek))
+    others = [o.plan for o in ranked[1:]]
+    notes.extend(_minutes_risk_notes(chosen, player_matches, players, target_gameweek, others))
+    notes.extend(_flow_notes(chosen, player_matches, players, target_gameweek, others))
     option_values = _option_values(
-        con, expected_points, player_matches, players, squad, target_gameweek
+        expected_points, p_full, players, squad, target_gameweek, sampler
     )
 
     return Recommendation(
@@ -353,37 +427,71 @@ def advise(
         deadline=deadline,
         notes=notes,
         option_values=option_values,
+        options=ranked,
+        chip_calls=calls,
+        objective=objective if against_rivals else "points",
+        league_name=league_state.name if against_rivals else None,
+        free_transfers=squad.free_transfers,
     )
 
 
-def _option_values(
-    con,
-    expected_points: pd.DataFrame,
-    player_matches: pd.DataFrame,
-    players: pd.DataFrame,
-    squad: milp.SquadState,
-    gameweek: int,
-) -> value_module.OptionValues | None:
-    """Price this squad's flexibilities under next weeks sampled from the panel's revisions."""
-    if not squad.players:
-        return None
+def _revision_sampler(con) -> revisions_module.RevisionSampler | None:
+    """The bootstrap of week-to-week projection revisions, once the projection panel exists."""
     try:
         stored = con.execute("SELECT count(*) FROM projection_panel").fetchone()[0]
     except Exception:  # pragma: no cover - table absent on an old warehouse
         return None
     if not stored:
         return None
+    try:
+        return revisions_module.RevisionSampler.fit(revisions_module.revisions(con))
+    except Exception as exc:  # pragma: no cover - never lose a plan over a diagnostic
+        log.warning("could not measure projection revisions: %s", exc)
+        return None
+
+
+def _revised_projections(
+    sampler: revisions_module.RevisionSampler | None,
+    plans: list[milp.Plan],
+    expected_points: pd.DataFrame,
+    p_full: pd.Series,
+    players: pd.DataFrame,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """The horizon's projection, revised as projections are between deadlines, for the players
+    any candidate fields; the options' robustness is measured under these."""
+    if sampler is None or len(plans) < 2:
+        return None, None
+    fielded = sorted({e for plan in plans for lineup in plan.lineups.values() for e in lineup})
+    expected = expected_points.reindex(fielded).fillna(0.0)
+    try:
+        revised = sampler.sample(
+            expected,
+            p_full,
+            players,
+            draws=ROBUSTNESS_REVISIONS,
+            rng=np.random.default_rng(0),
+        )
+    except Exception as exc:  # pragma: no cover - never lose a plan over a diagnostic
+        log.warning("could not revise the projections: %s", exc)
+        return None, None
+    return revised, np.array(fielded)
+
+
+def _option_values(
+    expected_points: pd.DataFrame,
+    p_full: pd.Series,
+    players: pd.DataFrame,
+    squad: milp.SquadState,
+    gameweek: int,
+    sampler: revisions_module.RevisionSampler | None,
+) -> value_module.OptionValues | None:
+    """Price this squad's flexibilities under next weeks sampled from the panel's revisions."""
+    if not squad.players or sampler is None:
+        return None
     remaining = [g for g in expected_points.columns if g > gameweek]
     if not remaining:
         return None
     try:
-        table = revisions_module.revisions(con)
-        sampler = revisions_module.RevisionSampler.fit(table)
-        p_full = (
-            player_matches[player_matches["event"] == gameweek]
-            .groupby("element")["p_full_base"]
-            .max()
-        )
         return value_module.live_option_values(
             expected_points[remaining], p_full, players, squad, sampler
         )
@@ -408,10 +516,23 @@ def _live_flow(
     return flow_module.live_flow(players, elapsed=elapsed)
 
 
+def _fielded_now(plan: milp.Plan, others: list[milp.Plan], gameweek: int) -> list[int]:
+    """Everyone in the coming week's squad of the plan or any alternative, plan's first."""
+    seen = list(plan.squads.get(gameweek, []))
+    for other in others:
+        seen += [e for e in other.squads.get(gameweek, []) if e not in seen]
+    return seen
+
+
 def _flow_notes(
-    plan: milp.Plan, player_matches: pd.DataFrame, players: pd.DataFrame, gameweek: int
+    plan: milp.Plan,
+    player_matches: pd.DataFrame,
+    players: pd.DataFrame,
+    gameweek: int,
+    others: list[milp.Plan] | None = None,
 ) -> list[str]:
-    """Name the squad members the market moved this week, so the shift can be argued with."""
+    """Name the players the market moved this week, so the shift can be argued with: the
+    squad's, and those of any alternative option."""
     if "flow_shift" not in player_matches.columns:
         return []
     shift = (
@@ -422,7 +543,7 @@ def _flow_notes(
     names = players.set_index("element")["web_name"]
     moved = [
         (e, float(shift.get(e, 0.0)))
-        for e in plan.squads.get(gameweek, [])
+        for e in _fielded_now(plan, others or [], gameweek)
         if abs(float(shift.get(e, 0.0))) >= 0.05
     ]
     if not moved:
@@ -430,14 +551,18 @@ def _flow_notes(
     moved.sort(key=lambda item: item[1])
     described = ", ".join(f"{names.get(e, e)} {w:+.0%}" for e, w in moved)
     return [
-        "Order flow, already priced into this plan (chance of an hour, this gameweek only): "
+        "Order flow, already priced into these options (chance of an hour, this gameweek only): "
         f"{described}. Managers' transfers before the deadline predicted absences in ten seasons "
         "of history; the live move is capped and scaled for the part of the week seen so far."
     ]
 
 
 def _minutes_risk_notes(
-    plan: milp.Plan, player_matches: pd.DataFrame, players: pd.DataFrame, gameweek: int
+    plan: milp.Plan,
+    player_matches: pd.DataFrame,
+    players: pd.DataFrame,
+    gameweek: int,
+    others: list[milp.Plan] | None = None,
 ) -> list[str]:
     """Name the recommended players whose minutes a new signing has just made uncertain.
 
@@ -453,18 +578,25 @@ def _minutes_risk_notes(
         .max()
     )
     names = players.set_index("element")["web_name"]
-    squad = plan.squads.get(gameweek, [])
+    squad = set(plan.squads.get(gameweek, []))
     lineup = set(plan.lineups.get(gameweek, []))
-    flagged = [(e, float(risk.get(e, 0.0))) for e in squad if risk.get(e, 0.0) > 0]
+    flagged = [
+        (e, float(risk.get(e, 0.0)))
+        for e in _fielded_now(plan, others or [], gameweek)
+        if risk.get(e, 0.0) > 0
+    ]
     if not flagged:
         return []
     flagged.sort(key=lambda item: -item[1])
-    described = ", ".join(
-        f"{names.get(e, e)} ({'starting' if e in lineup else 'bench'}, widened {w:.0%})"
-        for e, w in flagged
-    )
+
+    def role(e: int) -> str:
+        if e in lineup:
+            return "starting"
+        return "bench" if e in squad else "in another option"
+
+    described = ", ".join(f"{names.get(e, e)} ({role(e)}, widened {w:.0%})" for e, w in flagged)
     return [
-        "Minutes risk from new signings, already priced into this plan: "
+        "Minutes risk from new signings, already priced into these options: "
         f"{described}. Their club bought a competitor for the shirt after the last recorded "
         "gameweek. Historically that costs established starters about 4% of their chance of an "
         "hour in the first match, and nothing after the lineup is seen, so the projections are "
@@ -500,7 +632,7 @@ def _deadline(con, season: str, gameweek: int) -> dt.datetime | None:
 
 def _price_stage(
     con,
-    plan,
+    plans,
     players,
     squad,
     gameweek,
@@ -512,8 +644,14 @@ def _price_stage(
     solver_time_limit,
     options=None,
 ):
-    """Fit or fall back on a price model, then time the recommended transfers."""
+    """Fit or fall back on a price model, then time the transfers the options make this week.
+
+    ``plans`` is the ranked options, best first; every player any of them buys this week gets
+    buy-now-or-wait advice, in the order the options rank.
+    """
     options = options or {}
+    if isinstance(plans, milp.Plan):
+        plans = [plans]
     from .paths import PRICE_SNAPSHOTS
 
     snapshot = players.copy()
@@ -599,9 +737,15 @@ def _price_stage(
         log.warning("could not compute budget shadow price: %s", exc)
         points_per_tenth = 0.05
 
-    targets = players[players["element"].isin(plan.transfers_in.get(gameweek, []))][
-        ["element", "web_name"]
-    ]
+    buying: list[int] = []
+    for plan in plans:
+        buying += [e for e in plan.transfers_in.get(gameweek, []) if e not in buying]
+    targets = (
+        players.set_index("element")
+        .reindex(buying)
+        .dropna(subset=["web_name"])
+        .reset_index()[["element", "web_name"]]
+    )
     advice = (
         decide_module.decide(
             targets,
@@ -625,7 +769,11 @@ def _price_stage(
 
 
 def format_report(recommendation: Recommendation) -> str:
-    """A readable summary of the recommendation, for the terminal or a chat reply."""
+    """A readable summary of the recommendation, for the terminal or a chat reply.
+
+    It leads with the ranked options, because the choice between them is the manager's: the
+    planner's first choice, the alternatives it weighed, and how close the call is.
+    """
     names = dict(
         zip(recommendation.players["element"], recommendation.players["web_name"], strict=True)
     )
@@ -640,14 +788,26 @@ def format_report(recommendation: Recommendation) -> str:
             f"({hours:.0f}h away)" if hours > 0 else "Deadline has passed"
         )
 
-    lines += ["", "TRANSFER", "  " + recommendation.transfer_summary()]
+    if recommendation.options:
+        lines += ["", *_options_table(recommendation, names)]
+        lines += ["", "PATHS (each option over the horizon; later weeks are re-planned weekly)"]
+        for option in recommendation.options:
+            label = f"#{option.rank}" + (" (reference)" if option.reference else "")
+            move = move_summary(option.plan, gw, names, recommendation.free_transfers)
+            lines.append(f"Option {label}: {move}")
+            lines += ["  " + line for line in option.plan.summary(names).splitlines()]
+    else:
+        lines += ["", "TRANSFER", "  " + recommendation.transfer_summary()]
+        captain = recommendation.plan.captains.get(gw)
+        if captain:
+            lines.append(f"  Captain: {names.get(captain, captain)}")
 
-    captain = recommendation.plan.captains.get(gw)
-    if captain:
-        lines.append(f"  Captain: {names.get(captain, captain)}")
+    chips = _chip_lines(recommendation, names)
+    if chips:
+        lines += ["", "CHIPS (gain if played, against what holding it is worth)", *chips]
 
     if len(recommendation.price_advice):
-        lines += ["", "PRICE TIMING"]
+        lines += ["", "PRICE TIMING (every player an option buys this week)"]
         for row in recommendation.price_advice.itertuples():
             lines.append(f"  {row.web_name}: {row.recommendation} — {row.reason}")
 
@@ -657,31 +817,31 @@ def format_report(recommendation: Recommendation) -> str:
             lines.append(f"  {row.web_name}: {row.p_fall:.0%} chance of a drop, {row.urgency}")
 
     lines += ["", recommendation.roadmap.summary()]
-    lines += ["", "PLAN", recommendation.plan.summary(names)]
+    if not recommendation.options:
+        lines += ["", "PLAN", recommendation.plan.summary(names)]
 
     positions = dict(
         zip(recommendation.players["element"], recommendation.players["position"], strict=True)
     )
     lines += [
         "",
-        "LINEUPS",
+        "LINEUPS (option #1)" if recommendation.options else "LINEUPS",
         recommendation.plan.lineups_summary(names, positions, recommendation.expected_points),
     ]
 
     if recommendation.option_values is not None:
         values = recommendation.option_values
-        gw = recommendation.gameweek
         moves = len(recommendation.plan.transfers_in.get(gw, []))
         lines += [
             "",
-            "OPTIONS (what flexibility is worth to this squad)",
+            "FLEXIBILITY (what it is worth to this squad)",
             "  " + values.summary(),
             f"  best single swap under this week's projection: {values.best_swap_now:.2f} pts; "
-            f"the plan makes {moves} transfer(s) this week",
+            f"option #1 makes {moves} transfer(s) this week",
         ]
 
     if recommendation.league_metrics:
-        lines += ["", "LEAGUE"]
+        lines += ["", "LEAGUE (option #1)" if recommendation.options else "LEAGUE"]
         for key, value in recommendation.league_metrics.items():
             lines.append(f"  {key}: {value:.2f}")
 
@@ -689,3 +849,124 @@ def format_report(recommendation: Recommendation) -> str:
         lines += ["", "NOTES"] + [f"  - {n}" for n in recommendation.notes]
 
     return "\n".join(lines)
+
+
+def _options_table(recommendation: Recommendation, names: dict[int, str]) -> list[str]:
+    """The ranked options as a table, with what each column means underneath."""
+    options = recommendation.options
+    gw = recommendation.gameweek
+    rivals = all("expected_rivals_beaten" in o.metrics for o in options)
+    robust = all("robustness" in o.metrics for o in options)
+
+    if recommendation.objective == "points" or not rivals:
+        basis = "ranked on the planner's value (expected points, plus banked transfers)"
+    elif recommendation.objective == "blend":
+        basis = f"ranked on rivals beaten in {recommendation.league_name} and points together"
+    else:
+        basis = f"ranked on rivals beaten in {recommendation.league_name}"
+    lines = [f"OPTIONS — {basis}; the call is yours"]
+
+    header = f"  {'#':>3}  {'8-GW pts':>8}  {'vs #1':>5}  {f'GW{gw}':>5}"
+    if rivals:
+        header += f"  {'Rivals':>6}  {'Win':>4}"
+    header += f"  {'P10-P90':>9}"
+    if robust:
+        header += f"  {'Robust':>6}"
+    header += "  This week"
+    lines.append(header)
+
+    for option in options:
+        m = option.metrics
+        rank = f"{option.rank}{'*' if option.reference else ''}"
+        gap = "—" if option.rank == 1 else f"{m['gap']:+.1f}"
+        row = (
+            f"  {rank:>3}  {m['expected_points']:>8.1f}  {gap:>5}"
+            f"  {option.plan.expected_points.get(gw, 0.0):>5.1f}"
+        )
+        if rivals:
+            row += f"  {m['expected_rivals_beaten']:>6.2f}  {m['win_probability']:>4.0%}"
+        row += f"  {m['points_p10']:>4.0f}-{m['points_p90']:<4.0f}"
+        if robust:
+            row += f"  {m['robustness']:>6.0%}"
+        captain = names.get(option.plan.captains.get(gw, -1), "?")
+        move = move_summary(option.plan, gw, names, recommendation.free_transfers)
+        tags = f"  [{', '.join(option.tags)}]" if option.tags else ""
+        lines.append(f"{row}  {move}; (C) {captain}{tags}")
+
+    lines.append(
+        "  8-GW pts: expected points over the horizon, net of hits. P10-P90: the range eight in "
+        "ten simulated outcomes fall in."
+    )
+    on_value = recommendation.objective == "points" or not rivals
+    if robust:
+        best = "the planner's best" if on_value else "the candidate with the most points"
+        lines.append(
+            f"  Robust: how often the option is still {best} when the projections move as much "
+            "as they have between deadlines in nine replayed seasons, injuries included. Under "
+            "about 50% for #1 means a close call."
+        )
+    if any(o.tags for o in options):
+        lines.append(
+            "  [ ]: what an option leads the shown options on — "
+            + ", ".join(
+                f"{tag} = {label}" for tag, label in alternatives_module.TAG_LABELS.items()
+            )
+            + "."
+        )
+    for option in options:
+        if option.reference:
+            why = []
+            if alternatives_module.is_roll(option.plan, gw):
+                why.append("the do-nothing reference")
+            if "value" in option.tags:
+                why.append("the planner's own pick")
+            lines.append(
+                f"  {option.rank}*: ranks {option.rank} of the candidates, shown as "
+                f"{' and '.join(why) or 'a reference'}."
+            )
+    pick = next((o for o in options if "value" in o.tags), None)
+    if pick is not None and pick.rank != 1:
+        lines.append(
+            f"  On points plus what it prices a banked transfer at — the economy the replay "
+            f"measured — the planner would choose #{pick.rank}. The league ranking counts only "
+            "points scored, so it gives an unspent transfer no value."
+        )
+    return lines
+
+
+def _chip_lines(recommendation: Recommendation, names: dict[int, str]) -> list[str]:
+    """One line per chip still held: its gain now against the floor, and its best week."""
+    calls = recommendation.chip_calls
+    if calls is None or calls.empty:
+        return []
+    gw = recommendation.gameweek
+    lines = []
+    for row in calls.itertuples():
+        label = row.label + (" (2nd half)" if row.window else "")
+        if pd.isna(row.now_mean):
+            now = "not playable this week"
+        else:
+            extra = ""
+            if row.chip == "3xc":
+                captain = str(row.note).removeprefix("captain ").strip()
+                who = names.get(int(captain), captain) if captain.lstrip("-").isdigit() else ""
+                extra = f" (P90 +{row.now_upside:.1f}{', on ' + who if who else ''})"
+            if row.scheduled == gw:
+                verdict = "play it: it clears the floor"
+            elif row.scheduled:
+                verdict = f"held for GW{row.scheduled}, where it is worth more"
+            elif row.short_by > 0:
+                verdict = f"hold, short by {row.short_by:.1f}"
+            else:
+                verdict = "clears the floor, but another chip has the week"
+            now = (
+                f"+{row.now_mean:.1f} now{extra} against {row.now_floor:.1f} to hold — {verdict}"
+            )
+        best = (
+            f" Best in the horizon: GW{row.best_gameweek} +{row.best_mean:.1f} against "
+            f"{row.best_floor:.1f}."
+            if row.best_gameweek != gw
+            else ""
+        )
+        lines.append(f"  {label}: {now}.{best}")
+    return lines

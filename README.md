@@ -13,6 +13,11 @@ chip timing against it — for winning mini-leagues, not just for scoring points
 - **Targets your mini-leagues** by simulating rivals on the same random draws and maximising the
   number you finish above — which makes differentials emerge when you are behind and the template
   when you are ahead, without a risk dial to guess.
+- **Ranks the alternatives instead of dictating one.** Each run solves a pool of plans that each
+  make a different move this week, with the weeks after re-planned freely, and ranks them with
+  their spread of outcomes and their robustness: how often each is still the best when the
+  projections move as much as they have between deadlines in nine replayed seasons. Rolling is
+  always listed, and so is the planner's own pick when the league ranking disagrees with it.
 - **Tracks prices** hourly and decides buy-now versus wait-for-team-news using the optimiser's own
   shadow price on budget.
 - **Replays ten seasons** to validate itself: every deadline of the completed seasons is projected
@@ -379,7 +384,7 @@ src/fplass/
   ingest/           eleven seasons into DuckDB, plus the leakage-proof as_of view
   features/         team strength, minutes, per-90 rates, BPS, the order-flow layer
   sim/              Monte Carlo engine
-  optimise/         transfer MILP, chip roadmap, mini-league objective
+  optimise/         transfer MILP, chip roadmap, mini-league objective, ranked alternatives
   options/          what flexibility is worth: revisions, transfer/bank/bench values, chip timing, news risk
   backtest/         the projection panel, the paper manager, live calibration
   study/            the top managers' crawl, cohorts, missed transfers, the cohort signal

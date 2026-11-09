@@ -67,6 +67,8 @@ Useful options:
 - `--horizon 8` gameweeks to plan ahead. Longer is better for chip timing, slower to solve.
 - `--draws 10000` Monte Carlo draws. Drop to 3000 for a quick answer, raise to 20000 for a close call.
 - `--gameweek N` to plan a specific gameweek instead of the next one.
+- `--options 5` how many ranked options to show, each a different move this week. Roll is always
+  listed as the reference even when it ranks lower.
 
 ## Other questions
 
@@ -88,15 +90,23 @@ net-transfer model and will say so.
 
 ## How to present the answer
 
-Lead with the recommendation, then the reasoning. The tool prints a report — do not just paste it,
-read it and explain what matters:
+The user makes the final call. The report opens with a ranked OPTIONS table, and that table is
+the answer: give it as a compact table (move, captain, 8-GW points and the gap to #1, rivals
+beaten, P10–P90, robustness), then say which option you would pick and why, and what each
+alternative trades away. Do not reduce it to a single recommendation, and do not just paste the
+report — read it and explain what matters:
 
+- **How close the call is.** Gaps of a point or two over eight weeks are inside the noise, and a
+  rerun can reorder them. Robustness under about 50% for #1 means the model is not sure; say so.
+- **Where the league ranking and the planner disagree.** Against rivals the ranking counts points
+  scored only; the planner also prices a banked transfer. When the report marks the planner's own
+  pick as a reference (often the roll), present both and the trade-off.
 - **The transfer**, and explicitly whether taking a hit is worth it. "Roll your transfer" is a real
   and frequently correct answer; the optimiser prices a banked transfer, so if it says roll, say so.
 - **The captain**, mentioning upside when it differs from the mean. A Triple Captain is a bet on a
   ceiling, not an average.
-- **Chip timing**, including *why not now*. The roadmap deliberately holds chips when nothing clears
-  the value floor.
+- **Chip timing**, including *why not now*. The CHIPS section gives each chip's gain this week
+  against the value of holding it, so say how far short it falls, not only that it is held.
 - **Price urgency** only when it changes what they should do today.
 
 ## Things to be honest about

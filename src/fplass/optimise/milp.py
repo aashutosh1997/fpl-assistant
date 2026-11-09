@@ -327,8 +327,10 @@ def solve(
             The honest way to ask "what does the best plan with X look like": everything else
             is re-optimised around the constraint, rather than X being bribed into the plan with
             inflated points, which also makes him captain and distorts the rest of the squad.
-        forbidden: Previously found solutions to exclude, so the solver can be called repeatedly
-            to build a pool of distinct near-optimal plans for the league-aware stage.
+        forbidden: Previously found solutions to exclude, as ``{gameweek: squad}`` dicts, so the
+            solver can be called repeatedly to build a pool of distinct near-optimal plans. Each
+            named gameweek's fielded squad must differ from the given one by at least a player;
+            gameweeks not named are unconstrained.
         transfers: Exactly how many transfers to make in given gameweeks, as
             ``{gameweek: count}``. For a policy that decides how many moves to make (roll,
             one, two, a hit) and leaves the solver to choose which; ignored in a gameweek
@@ -624,9 +626,15 @@ def solve(
     )
 
     # No-good cuts, so repeated calls yield genuinely different plans rather than the same one.
+    # Each entry cuts only the gameweeks it names: the advisor names the coming week alone, so
+    # each alternative is a different decision now with the weeks after re-planned freely,
+    # rather than a plan forced to differ in every week of the horizon. The cut is on the team
+    # actually fielded: in a pinned free-hit week the permanent squad cannot move at all, so a
+    # cut on it would make every later solve infeasible.
     for previous_plan in forbidden or []:
         for gw, chosen in previous_plan.items():
-            in_plan = [squad[e, gw] for e in chosen if (e, gw) in squad]
+            fielded = fh_squad if (chip_schedule or {}).get(gw) == "freehit" else squad
+            in_plan = [fielded[e, gw] for e in chosen if (e, gw) in fielded]
             if in_plan:
                 problem += pulp.lpSum(in_plan) <= len(in_plan) - 1
 

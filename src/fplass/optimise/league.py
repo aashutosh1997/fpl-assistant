@@ -342,16 +342,20 @@ def choose(
         rows.append(metrics)
 
     table = pd.DataFrame(rows)
-    if objective == "points":
-        table["score"] = table["expected_points"]
-    elif objective == "blend":
-        table["score"] = (
-            table["expected_rivals_beaten"].rank() + table["expected_points"].rank()
-        ) / 2
-    else:
-        # Expected rivals beaten, with expected points as a tiebreak — among plans that win the
-        # league equally often, prefer the one that also scores more.
-        table["score"] = table["expected_rivals_beaten"] + 1e-6 * table["expected_points"]
-
+    table["score"] = objective_score(table, objective)
     table = table.sort_values("score", ascending=False, ignore_index=True)
     return plans[int(table.iloc[0]["plan"])], table
+
+
+def objective_score(table: pd.DataFrame, objective: str) -> pd.Series:
+    """The number plans are ranked on, higher better, from a table of :func:`evaluate` metrics.
+
+    Without rival metrics (no league given) every objective ranks on expected points.
+    """
+    if objective == "points" or "expected_rivals_beaten" not in table.columns:
+        return table["expected_points"]
+    if objective == "blend":
+        return (table["expected_rivals_beaten"].rank() + table["expected_points"].rank()) / 2
+    # Expected rivals beaten, with expected points as a tiebreak — among plans that win the
+    # league equally often, prefer the one that also scores more.
+    return table["expected_rivals_beaten"] + 1e-6 * table["expected_points"]

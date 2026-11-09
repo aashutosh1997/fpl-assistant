@@ -458,3 +458,80 @@ def test_roadmap_with_no_playable_chip_is_empty(points, universe, windows, con):
         state, plan, late, "2019-20", wildcard_candidates=0,
     )
     assert roadmap.schedule == {} and roadmap.valuations.empty
+
+
+# ------------------------------------------------------------ distinct alternatives
+
+
+def _held(points, universe, windows, free_transfers: int = 1) -> SquadState:
+    """The best opening squad, held with one free transfer: a squad that has a real choice."""
+    opening = solve_scenario(
+        points, universe, SquadState(players={}, bank=1000, free_transfers=15), windows,
+        allow_chips=False,
+    )
+    squad = opening.squads[GAMEWEEKS[0]]
+    price = universe.set_index("element")["price"]
+    return SquadState(
+        players={e: int(price.loc[e]) for e in squad},
+        bank=1000 - int(price.loc[squad].sum()),
+        free_transfers=free_transfers,
+    )
+
+
+def test_a_cut_on_one_gameweek_leaves_the_others_free(points, universe, windows):
+    """Forbidding this week's squad gives a different move now, and nothing else is forced.
+
+    The old pool cut every week of an earlier plan, so an alternative had to differ in week
+    three too and looked worse than it was; a cut on the coming week alone is never tighter.
+    """
+    held = _held(points, universe, windows)
+    first = solve_scenario(points, universe, held, windows, allow_chips=False)
+    now = GAMEWEEKS[0]
+
+    one_week = solve_scenario(
+        points, universe, held, windows, allow_chips=False,
+        forbidden=[{now: first.squads[now]}],
+    )
+    every_week = solve_scenario(
+        points, universe, held, windows, allow_chips=False,
+        forbidden=[{gw: first.squads[gw] for gw in GAMEWEEKS}],
+    )
+    assert set(one_week.squads[now]) != set(first.squads[now])
+    assert one_week.objective >= every_week.objective - 1e-6
+    for gw in GAMEWEEKS:
+        assert set(every_week.squads[gw]) != set(first.squads[gw])
+
+
+def test_a_cut_in_a_free_hit_week_applies_to_the_free_hit_squad(points, universe, windows):
+    """Under a pinned free hit the fielded team is the free-hit squad, so that is what differs."""
+    held = _held(points, universe, windows)
+    schedule = {2: "freehit"}
+    first = solve_scenario(points, universe, held, windows, chip_schedule=schedule)
+    second = solve_scenario(
+        points, universe, held, windows, chip_schedule=schedule,
+        forbidden=[{2: first.squads[2]}],
+    )
+    assert second.status == "Optimal"
+    assert second.chips.get(2) == "freehit"
+    assert set(second.squads[2]) != set(first.squads[2])
+
+
+def test_distinct_plans_differ_now_and_always_include_a_roll(points, universe, windows):
+    from fplass.optimise.alternatives import distinct_plans, is_roll
+
+    held = _held(points, universe, windows)
+    now = GAMEWEEKS[0]
+
+    def solve_candidate(**extra):
+        return solve_scenario(points, universe, held, windows, allow_chips=False, **extra)
+
+    plans = distinct_plans(solve_candidate, now, held, pool_size=3)
+    squads = [frozenset(p.squads[now]) for p in plans]
+    assert len(set(squads)) == len(plans)
+    assert 3 <= len(plans) <= 4
+    assert any(is_roll(p, now) for p in plans)
+    # The first plan is the unconstrained optimum, so option #1 is what the solver alone picks.
+    assert plans[0].objective == pytest.approx(solve_candidate().objective, abs=1e-6)
+
+
+# ------------------------------------------------------- a price per banked transfer

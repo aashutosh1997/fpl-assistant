@@ -115,8 +115,11 @@ def plan_command(
     config: str = typer.Option(
         None, help="Planner knobs to override, e.g. 'banked_transfer_value=2.0,chip_rule=continuation'."
     ),
+    options: int = typer.Option(
+        5, "--options", help="Ranked options to show, each a different move this week."
+    ),
 ) -> None:
-    """Recommend this week's transfers, captain and chip strategy."""
+    """Rank this week's best options — transfers, captain, chips — for you to choose from."""
     from .advise import advise, format_report
     from .ingest.warehouse import connect
     from .optimise.policy import PolicyConfig
@@ -133,6 +136,7 @@ def plan_command(
             objective=objective,
             solver_time_limit=solver_seconds,
             config=PolicyConfig.parse(config),
+            n_options=options,
         )
         typer.echo(format_report(recommendation))
     finally:
